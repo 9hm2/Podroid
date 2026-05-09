@@ -76,7 +76,6 @@ import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -87,6 +86,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -121,11 +121,11 @@ fun TerminalScreen(
     viewModel: TerminalViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
-    val vmState by viewModel.vmState.collectAsState()
-    val fontSize by viewModel.terminalFontSize.collectAsState()
-    val showQuickSettings by viewModel.showQuickSettings.collectAsState()
-    val showExtraKeys by viewModel.showExtraKeysFlow.collectAsState()
-    val hapticsEnabled by viewModel.hapticsEnabledFlow.collectAsState()
+    val vmState by viewModel.vmState.collectAsStateWithLifecycle()
+    val fontSize by viewModel.terminalFontSize.collectAsStateWithLifecycle()
+    val showQuickSettings by viewModel.showQuickSettings.collectAsStateWithLifecycle()
+    val showExtraKeys by viewModel.showExtraKeysFlow.collectAsStateWithLifecycle()
+    val hapticsEnabled by viewModel.hapticsEnabledFlow.collectAsStateWithLifecycle()
 
     DisposableEffect(Unit) {
         val activity = context as? Activity
@@ -154,14 +154,8 @@ fun TerminalScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val colorTheme by viewModel.terminalColorTheme.collectAsState()
-    val terminalFont by viewModel.terminalFont.collectAsState()
-
-    // Resolve the typeface and background palette from settings. Both run on
-    // recomposition because they're cheap (asset reads, font cache lookup) and
-    // the result drives the View setters in LaunchedEffect below.
-    val typeface = remember(terminalFont) { viewModel.loadFont(terminalFont) }
-    val themeBg = remember(colorTheme) { viewModel.loadColorTheme(colorTheme) }
+    val colorTheme by viewModel.terminalColorTheme.collectAsStateWithLifecycle()
+    val terminalFont by viewModel.terminalFont.collectAsStateWithLifecycle()
 
     if (showQuickSettings) {
         QuickSettingsDialog(
@@ -260,98 +254,17 @@ fun TerminalScreen(
             }
 
             is VmState.Running -> {
-                Box(modifier = Modifier.weight(1f).fillMaxSize()) {
-                    // The View is created per-Composition-context (i.e. per Activity).
-                    // Caching it across config changes used to leak the destroyed Activity.
-                    val view = remember(context) {
-                        TerminalView(context, null).apply {
-                            setTextSize(fontSize)
-                            keepScreenOn = true
-                            isFocusable = true
-                            isFocusableInTouchMode = true
-                        }
-                    }
-
-                    LaunchedEffect(view, themeBg) {
-                        view.setBackgroundColor(themeBg ?: android.graphics.Color.BLACK)
-                    }
-                    LaunchedEffect(view, typeface) {
-                        view.setTypeface(typeface)
-                        view.post {
-                            viewModel.forceUpdateSizeFromView(view, typeface)
-                            view.updateSize()
-                        }
-                    }
-
-                    DisposableEffect(view, vmState) {
-                        viewModel.resetOnRestart()
-                        viewModel.bindView(view)
-                        viewModel.createSession()
-                        view.setTerminalViewClient(viewModel.viewClient)
-                        val sess = viewModel.session
-                        if (sess != null) {
-                            view.mTermSession = sess
-                            view.mEmulator = sess.emulator
-                        }
-                        view.requestFocus()
-                        view.onScreenUpdated()
-
-                        view.post {
-                            viewModel.forceUpdateSizeFromView(view, typeface)
-                            view.updateSize()
-                            view.onScreenUpdated()
-                        }
-                        onDispose { viewModel.bindView(null) }
-                    }
-
-                    // Layout-change debounce: keyboard slide animation fires ~25 layout
-                    // events. Coroutine debounce collapses them to one SIGWINCH.
-                    val scope = rememberCoroutineScope()
-                    DisposableEffect(view) {
-                        var pending: kotlinx.coroutines.Job? = null
-                        val listener = android.view.View.OnLayoutChangeListener {
-                            v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
-                            val w = right - left
-                            val h = bottom - top
-                            if (w <= 0 || h <= 0) return@OnLayoutChangeListener
-                            if (w == oldRight - oldLeft && h == oldBottom - oldTop) return@OnLayoutChangeListener
-                            pending?.cancel()
-                            pending = scope.launch {
-                                kotlinx.coroutines.delay(150)
-                                val tv = v as TerminalView
-                                // Just tv.updateSize() — it has the correct row math
-                                // (subtracts mFontLineSpacingAndAscent). Calling
-                                // forceUpdateSizeFromView too caused a row-count race:
-                                // the two computations disagree by 1 in some sizes,
-                                // triggering two back-to-back resizes per keyboard
-                                // slide and a visible cursor flicker.
-                                tv.updateSize()
-                            }
-                        }
-                        view.addOnLayoutChangeListener(listener)
-                        onDispose {
-                            pending?.cancel()
-                            view.removeOnLayoutChangeListener(listener)
-                        }
-                    }
-
-                    // Last fontSize actually pushed to the View. Termux's TerminalView has no
-                    // getTextSize(), so we track it ourselves to skip redundant setTextSize +
-                    // updateSize calls on each recomposition (which were the visible flicker
-                    // source whenever extraCtrl/extraAlt flipped).
-                    var lastAppliedFontSize by remember { mutableStateOf(-1) }
-                    AndroidView(
-                        factory = { view },
-                        update = { v ->
-                            if (lastAppliedFontSize != fontSize) {
-                                lastAppliedFontSize = fontSize
-                                v.setTextSize(fontSize)
-                                v.post { v.updateSize() }
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+                // Hoisted into its own composable so toggling chrome state in the
+                // parent (showQuickSettings, showExtraKeys, hapticsEnabled, modifier
+                // keys, etc.) doesn't invalidate the AndroidView slot. TerminalSurface
+                // takes only the ViewModel (stable @HiltViewModel) so Compose's
+                // restart-scope skipping kicks in: chrome toggles → parent recomposes,
+                // surface skips. The terminal pixels never re-route through Compose
+                // unless something the surface actually reads has changed.
+                TerminalSurface(
+                    viewModel = viewModel,
+                    modifier = Modifier.weight(1f).fillMaxSize(),
+                )
             }
         }
 
@@ -367,6 +280,172 @@ fun TerminalScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * Owns the TerminalView. Isolated as its own composable so chrome state
+ * (quick-settings sheet, extra-keys toggle, haptics, etc.) lives in the
+ * parent's restart scope and never invalidates this slot. The only reads
+ * here drive things the View genuinely needs: typeface, palette, font size.
+ *
+ * `update = { }` — the View manages its own state. All View setters are
+ * driven by narrow-keyed LaunchedEffects so Compose only touches the View
+ * when the actual driving input changes, never on incidental recomposition.
+ */
+@Composable
+private fun TerminalSurface(
+    viewModel: TerminalViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val fontSize by viewModel.terminalFontSize.collectAsStateWithLifecycle()
+    val colorTheme by viewModel.terminalColorTheme.collectAsStateWithLifecycle()
+    val terminalFont by viewModel.terminalFont.collectAsStateWithLifecycle()
+
+    // Resolve typeface + palette here (cheap: asset reads, font cache lookup).
+    // Each is keyed on its specific upstream string so a theme change does not
+    // re-resolve the font and vice versa.
+    val typeface = remember(terminalFont) { viewModel.loadFont(terminalFont) }
+    val themeBg = remember(colorTheme) { viewModel.loadColorTheme(colorTheme) }
+
+    Box(modifier = modifier) {
+        // The View is created per-Composition-context (i.e. per Activity).
+        // Caching it across config changes used to leak the destroyed Activity.
+        val view = remember(context) {
+            TerminalView(context, null).apply {
+                setTextSize(fontSize)
+                keepScreenOn = true
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+        }
+
+        // Theme background — keyed only on themeBg so font/size changes don't
+        // re-fire it. We also force a repaint here because loadColorTheme()
+        // pushes the new palette into the live session's mCurrentColors, but
+        // doesn't itself trigger an invalidate — without this the screen
+        // keeps painting with the old colors until the next PTY byte.
+        LaunchedEffect(view, themeBg) {
+            view.setBackgroundColor(themeBg ?: android.graphics.Color.BLACK)
+            view.onScreenUpdated()
+        }
+
+        // Typeface — keyed only on the resolved Typeface. Re-pushes size to the
+        // session because cell metrics (charWidth/lineHeight) change with the
+        // font, not just with text size. Use only view.updateSize() (its row
+        // math subtracts mFontLineSpacingAndAscent); calling
+        // forceUpdateSizeFromView in addition disagrees by ±1 row and causes
+        // cursor flicker.
+        LaunchedEffect(view, typeface) {
+            view.setTypeface(typeface)
+            view.post { view.updateSize() }
+        }
+
+        // Font size — keyed only on the int. Replaces the old guard-in-update
+        // pattern: now `update = { }` is a true no-op and Compose touches the
+        // View only when fontSize actually changes.
+        LaunchedEffect(view, fontSize) {
+            view.setTextSize(fontSize)
+            view.post { view.updateSize() }
+        }
+
+        // Session/client binding. Keyed on `view` only — we are inside the
+        // VmState.Running branch so vmState identity is stable while we live.
+        // (Previous `DisposableEffect(view, vmState)` was wider than necessary;
+        // narrowing means transient VM state churn can't re-bind the session.)
+        DisposableEffect(view) {
+            viewModel.resetOnRestart()
+            viewModel.bindView(view)
+            viewModel.createSession()
+            view.setTerminalViewClient(viewModel.viewClient)
+            val sess = viewModel.session
+            if (sess != null) {
+                view.mTermSession = sess
+                view.mEmulator = sess.emulator
+            }
+            view.requestFocus()
+            view.onScreenUpdated()
+
+            // view.updateSize() only — its row math subtracts
+            // mFontLineSpacingAndAscent. forceUpdateSizeFromView disagrees by
+            // ±1 row in some sizes and causes a visible cursor flicker on
+            // first paint.
+            view.post {
+                view.updateSize()
+                view.onScreenUpdated()
+            }
+
+            // Cursor blinker: the host app must opt in — TerminalView ships the
+            // mechanism but never starts itself. 500ms is the conventional rate.
+            // startOnlyIfCursorEnabled=false because the renderer already gates
+            // paint via shouldCursorBeVisible() (which honors ?25l), so it's
+            // safe to leave the FrameCallback driving and let the emulator say
+            // when the cursor is hidden.
+            view.setTerminalCursorBlinkerRate(500)
+            view.setTerminalCursorBlinkerState(true, false)
+
+            onDispose { viewModel.bindView(null) }
+        }
+
+        // Pause the blinker when the activity is backgrounded. Without this
+        // the Choreographer FrameCallback keeps firing every VSYNC in
+        // paused-without-detach states (split-screen, dialog occlusion, PiP).
+        // onDetachedFromWindow already handles the full-detach case.
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(view, lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_RESUME -> view.setTerminalCursorBlinkerState(true, false)
+                    Lifecycle.Event.ON_PAUSE  -> view.setTerminalCursorBlinkerState(false, false)
+                    else -> {}
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
+        // Layout-change debounce: keyboard slide animation fires ~25 layout
+        // events. Coroutine debounce collapses them to one SIGWINCH. We also
+        // tell the View to suppress its blink toggle during the settle window
+        // so the cursor doesn't visibly flicker on/off mid-animation.
+        val scope = rememberCoroutineScope()
+        DisposableEffect(view) {
+            var pending: kotlinx.coroutines.Job? = null
+            val listener = android.view.View.OnLayoutChangeListener {
+                v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                val w = right - left
+                val h = bottom - top
+                if (w <= 0 || h <= 0) return@OnLayoutChangeListener
+                if (w == oldRight - oldLeft && h == oldBottom - oldTop) return@OnLayoutChangeListener
+                pending?.cancel()
+                val tv = v as TerminalView
+                tv.setLayoutSettling(true)
+                pending = scope.launch {
+                    kotlinx.coroutines.delay(150)
+                    // Just tv.updateSize() — it has the correct row math
+                    // (subtracts mFontLineSpacingAndAscent). Calling
+                    // forceUpdateSizeFromView too caused a row-count race:
+                    // the two computations disagree by 1 in some sizes,
+                    // triggering two back-to-back resizes per keyboard
+                    // slide and a visible cursor flicker.
+                    tv.updateSize()
+                    tv.setLayoutSettling(false)
+                }
+            }
+            view.addOnLayoutChangeListener(listener)
+            onDispose {
+                pending?.cancel()
+                view.setLayoutSettling(false)
+                view.removeOnLayoutChangeListener(listener)
+            }
+        }
+
+        AndroidView(
+            factory = { view },
+            update = { },
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 

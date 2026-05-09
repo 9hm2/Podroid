@@ -149,9 +149,22 @@ class TerminalViewModel @Inject constructor(
      * Returns null background for the built-in default.
      */
     fun loadColorTheme(theme: String): Int? {
-        if (theme == "default") return null
-        val props = readThemeProperties(theme) ?: return null
+        // "default" path passes empty props through updateWith → resets
+        // COLOR_SCHEME to the built-in defaults and yields a null bg
+        // (renderer falls back to BLACK). Previously the "default" branch
+        // returned early without resetting, so switching from a custom
+        // theme to "default" left the previous palette in place.
+        val props = if (theme == "default") {
+            java.util.Properties()
+        } else {
+            readThemeProperties(theme) ?: return null
+        }
         TerminalColors.COLOR_SCHEME.updateWith(props)
+        // updateWith refreshes the static defaults, but the live session's
+        // mCurrentColors is a per-session cache populated at session start
+        // and on `\ec` (RIS). Without this push, theme changes only took
+        // effect after the user typed `reset` in the shell.
+        session?.emulator?.mColors?.reset()
         return (props["background"] as? String)?.let { parseColor(it) }
     }
 

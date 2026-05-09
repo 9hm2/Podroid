@@ -9,14 +9,13 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Typeface;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.view.ActionMode;
+import android.view.Choreographer;
 import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
@@ -59,12 +58,98 @@ public final class TerminalView extends View {
 
     private TextSelectionCursorController mTextSelectionCursorController;
 
-    private Handler mTerminalCursorBlinkerHandler;
-    private TerminalCursorBlinkerRunnable mTerminalCursorBlinkerRunnable;
     private int mTerminalCursorBlinkerRate;
     private boolean mCursorInvisibleIgnoreOnce;
     public static final int TERMINAL_CURSOR_BLINK_RATE_MIN = 100;
     public static final int TERMINAL_CURSOR_BLINK_RATE_MAX = 2000;
+
+    /**
+     * VSYNC-aligned invalidate + cursor-blink driver.
+     *
+     * A single {@link Choreographer.FrameCallback} coalesces:
+     *   - screen invalidates triggered by {@link #onScreenUpdated()} (Goal A: collapses
+     *     a burst of N PTY-input batches into one paint per VSYNC), and
+     *   - cursor-blink toggles (Goal B: blink edges land on a frame boundary instead of
+     *     drifting off-VSYNC under a Handler.postDelayed schedule).
+     *
+     * The callback is re-posted while either an invalidate is pending or blink is enabled.
+     * It is unposted on detach / session end to avoid leaking the callback.
+     */
+    /** Wait this long after the most recent PTY-input chunk before painting,
+     *  so multi-chunk bursts (less row-by-row redraws, bash readline reprints,
+     *  long lines split by the kernel) collapse into one paint instead of a
+     *  visible cursor walk. Tuned to ≈ one VSYNC. */
+    private static final long INPUT_COALESCE_QUIET_MS = 16;
+
+    /** Hard cap on how long a single burst can defer paints. Without it, a
+     *  continuous output stream (yes, while-true, sixel video) would never
+     *  paint. 64 ms ≈ 4 VSYNCs at 60 Hz — fast enough that the user perceives
+     *  the screen as live. */
+    private static final long INPUT_COALESCE_MAX_MS = 64;
+
+    private final Choreographer mChoreographer = Choreographer.getInstance();
+    private final Choreographer.FrameCallback mFrameCallback = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            mFramePosted = false;
+            long nowMs = frameTimeNanos / 1_000_000L;
+
+            // Goal B: blink-tick-if-due. Toggle only when the user-configured rate has
+            // elapsed since the last toggle; the FrameCallback fires every VSYNC but
+            // the visual blink rate is preserved by the elapsed-time gate.
+            // Suppressed while a layout change is settling (keyboard slide, rotation,
+            // sheet open) so the cursor doesn't blink off mid-animation while the
+            // View bounds are still changing.
+            if (!mLayoutSettling
+                    && mBlinkEnabled && mEmulator != null && mTerminalCursorBlinkerRate > 0) {
+                if (nowMs - mLastBlinkMs >= mTerminalCursorBlinkerRate) {
+                    mBlinkCursorVisible = !mBlinkCursorVisible;
+                    mEmulator.setCursorBlinkState(mBlinkCursorVisible);
+                    mLastBlinkMs = nowMs;
+                    mInvalidatePending = true;
+                }
+            }
+
+            // Goal A: invalidate-if-pending, with input-coalesce. We paint only
+            // when (a) input has been quiet for INPUT_COALESCE_QUIET_MS or (b)
+            // the burst has been deferring for at least INPUT_COALESCE_MAX_MS.
+            // Otherwise we keep mInvalidatePending=true and re-post for the
+            // next VSYNC. This collapses a 20-chunk less-page-down redraw into
+            // a single paint instead of a cursor walking down the column.
+            if (mInvalidatePending) {
+                boolean quiet = nowMs - mLastInputMs >= INPUT_COALESCE_QUIET_MS;
+                boolean capped = mFirstDeferredInputMs != 0
+                        && nowMs - mFirstDeferredInputMs >= INPUT_COALESCE_MAX_MS;
+                if (quiet || capped) {
+                    mInvalidatePending = false;
+                    mFirstDeferredInputMs = 0;
+                    invalidate();
+                }
+                // else: defer; the re-post below keeps the callback alive.
+            }
+
+            // Re-post if either blink is running or we still owe a deferred
+            // paint. (Blink alone wakes us once per VSYNC; deferred paints
+            // need the same cadence so they can re-check the quiet condition.)
+            if (mBlinkEnabled || mInvalidatePending) {
+                mFramePosted = true;
+                mChoreographer.postFrameCallback(this);
+            }
+        }
+    };
+    private boolean mInvalidatePending;
+    private boolean mFramePosted;
+    private boolean mBlinkEnabled;
+    private boolean mBlinkCursorVisible;
+    private long mLastBlinkMs;
+    /** Wall-clock of the most recent input chunk (for INPUT_COALESCE_QUIET_MS). */
+    private long mLastInputMs;
+    /** Wall-clock of the first input chunk in the current deferred burst. Reset
+     *  to 0 every time a paint actually lands. (For INPUT_COALESCE_MAX_MS cap.) */
+    private long mFirstDeferredInputMs;
+    /** While true, the FrameCallback skips blink toggles. Set during keyboard
+     *  slides and other layout settles (host calls setLayoutSettling). */
+    private boolean mLayoutSettling;
 
     /** The top row of text to display. Ranges from -activeTranscriptRows to 0. */
     int mTopRow;
@@ -494,8 +579,40 @@ public final class TerminalView extends View {
 
         mEmulator.clearScrollCounter();
 
-        invalidate();
+        scheduleFrameInvalidate();
         if (mAccessibilityEnabled) setContentDescription(getText());
+    }
+
+    /**
+     * Mark a frame invalidate as pending and post the shared {@link Choreographer.FrameCallback}
+     * if it isn't already posted. Always called on the main thread (PTY-input drains arrive
+     * via {@code TerminalSession.MainThreadHandler} → {@code TerminalSessionClient.onTextChanged}
+     * → {@link #onScreenUpdated()}), so no synchronization is required.
+     */
+    private void scheduleFrameInvalidate() {
+        long now = SystemClock.uptimeMillis();
+        mInvalidatePending = true;
+        // Track input timing for the burst-coalesce in doFrame. mFirstDeferredInputMs
+        // is set on the first chunk of a burst and cleared whenever a paint lands.
+        if (mFirstDeferredInputMs == 0) mFirstDeferredInputMs = now;
+        mLastInputMs = now;
+        // Suppress cursor blink during active screen updates: when typing (or any
+        // PTY-driven screen change) the cursor must stay solidly visible. Otherwise
+        // the block cursor inverts characters under it and the blink toggle makes
+        // each character appear to flicker between two colors as the cursor moves.
+        // Resetting mLastBlinkMs here delays the next toggle by a full blink
+        // interval after activity stops, so the cursor only blinks when idle.
+        if (mBlinkEnabled && mEmulator != null) {
+            if (!mBlinkCursorVisible) {
+                mBlinkCursorVisible = true;
+                mEmulator.setCursorBlinkState(true);
+            }
+            mLastBlinkMs = now;
+        }
+        if (!mFramePosted) {
+            mFramePosted = true;
+            mChoreographer.postFrameCallback(mFrameCallback);
+        }
     }
 
     /** This must be called by the hosting activity in {@link Activity#onContextMenuClosed(Menu)}
@@ -995,9 +1112,8 @@ public final class TerminalView extends View {
             mEmulator = mTermSession.getEmulator();
             mClient.onEmulatorSet();
 
-            // Update mTerminalCursorBlinkerRunnable inner class mEmulator on session change
-            if (mTerminalCursorBlinkerRunnable != null)
-                mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
+            // The shared FrameCallback reads mEmulator directly, so no per-session
+            // re-binding is needed (was previously mTerminalCursorBlinkerRunnable.setEmulator).
 
             mTopRow = 0;
             scrollTo(0, 0);
@@ -1294,14 +1410,55 @@ public final class TerminalView extends View {
                 return;
             }
 
-            // Start cursor blinker runnable
+            // Start the VSYNC-aligned cursor blinker. The shared FrameCallback gates
+            // the toggle behind mTerminalCursorBlinkerRate, so the user-configurable
+            // blink rate is preserved while the actual paint lands on a frame boundary.
             if (TERMINAL_VIEW_KEY_LOGGING_ENABLED)
                 mClient.logVerbose(LOG_TAG, "Starting cursor blinker with the blink rate " + mTerminalCursorBlinkerRate);
-            if (mTerminalCursorBlinkerHandler == null)
-                mTerminalCursorBlinkerHandler = new Handler(Looper.getMainLooper());
-            mTerminalCursorBlinkerRunnable = new TerminalCursorBlinkerRunnable(mEmulator, mTerminalCursorBlinkerRate);
             mEmulator.setCursorBlinkingEnabled(true);
-            mTerminalCursorBlinkerRunnable.run();
+            // Show the cursor immediately on enable, then let the FrameCallback gate
+            // subsequent toggles by mTerminalCursorBlinkerRate.
+            mBlinkCursorVisible = true;
+            mEmulator.setCursorBlinkState(mBlinkCursorVisible);
+            mLastBlinkMs = SystemClock.uptimeMillis();
+            mBlinkEnabled = true;
+            mInvalidatePending = true;
+            if (!mFramePosted) {
+                mFramePosted = true;
+                mChoreographer.postFrameCallback(mFrameCallback);
+            }
+        }
+    }
+
+    /**
+     * Mark the View as in the middle of a layout-settle window (e.g., the soft
+     * keyboard is sliding in/out). While true, the FrameCallback skips blink
+     * toggles so the cursor doesn't blink off mid-animation. Entering settle
+     * forces the cursor visible immediately so a paint that lands during the
+     * settle shows the cursor solidly. Leaving settle resets the blink timer
+     * so the post-settle frame doesn't immediately toggle.
+     */
+    public synchronized void setLayoutSettling(boolean settling) {
+        if (mLayoutSettling == settling) return;
+        mLayoutSettling = settling;
+        if (settling) {
+            if (mBlinkEnabled && mEmulator != null && !mBlinkCursorVisible) {
+                mBlinkCursorVisible = true;
+                mEmulator.setCursorBlinkState(true);
+                mInvalidatePending = true;
+                if (!mFramePosted) {
+                    mFramePosted = true;
+                    mChoreographer.postFrameCallback(mFrameCallback);
+                }
+            }
+        } else {
+            // Resetting on settle-end starts the next blink interval from zero,
+            // matching scheduleFrameInvalidate's "fresh interval after activity
+            // stops" rule. Without this the FrameCallback could toggle the
+            // cursor on its very first post-settle frame.
+            if (mBlinkEnabled) {
+                mLastBlinkMs = SystemClock.uptimeMillis();
+            }
         }
     }
 
@@ -1309,45 +1466,16 @@ public final class TerminalView extends View {
      * Cancel the terminal cursor blinker callbacks
      */
     private void stopTerminalCursorBlinker() {
-        if (mTerminalCursorBlinkerHandler != null && mTerminalCursorBlinkerRunnable != null) {
+        if (mBlinkEnabled) {
             if (TERMINAL_VIEW_KEY_LOGGING_ENABLED)
                 mClient.logVerbose(LOG_TAG, "Stopping cursor blinker");
-            mTerminalCursorBlinkerHandler.removeCallbacks(mTerminalCursorBlinkerRunnable);
-        }
-    }
-
-    private class TerminalCursorBlinkerRunnable implements Runnable {
-
-        private TerminalEmulator mEmulator;
-        private final int mBlinkRate;
-
-        // Initialize with false so that initial blink state is visible after toggling
-        boolean mCursorVisible = false;
-
-        public TerminalCursorBlinkerRunnable(TerminalEmulator emulator, int blinkRate) {
-            mEmulator = emulator;
-            mBlinkRate = blinkRate;
-        }
-
-        public void setEmulator(TerminalEmulator emulator) {
-            mEmulator = emulator;
-        }
-
-        public void run() {
-            try {
-                if (mEmulator != null) {
-                    // Toggle the blink state and then invalidate() the view so
-                    // that onDraw() is called, which then calls TerminalRenderer.render()
-                    // which checks with TerminalEmulator.shouldCursorBeVisible() to decide whether
-                    // to draw the cursor or not
-                    mCursorVisible = !mCursorVisible;
-                    //mClient.logVerbose(LOG_TAG, "Toggling cursor blink state to " + mCursorVisible);
-                    mEmulator.setCursorBlinkState(mCursorVisible);
-                    invalidate();
-                }
-            } finally {
-                // Recall the Runnable after mBlinkRate milliseconds to toggle the blink state
-                mTerminalCursorBlinkerHandler.postDelayed(this, mBlinkRate);
+            mBlinkEnabled = false;
+            // The FrameCallback re-posts itself only while mBlinkEnabled is true; it will
+            // drain naturally on the next firing. If no invalidate is pending either, also
+            // remove it so we don't keep waking the Choreographer for a no-op.
+            if (mFramePosted && !mInvalidatePending) {
+                mChoreographer.removeFrameCallback(mFrameCallback);
+                mFramePosted = false;
             }
         }
     }
@@ -1454,6 +1582,15 @@ public final class TerminalView extends View {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+
+        // Stop the VSYNC-aligned blink/invalidate driver and unpost the shared
+        // FrameCallback so it doesn't leak this View past detach.
+        mBlinkEnabled = false;
+        mInvalidatePending = false;
+        if (mFramePosted) {
+            mChoreographer.removeFrameCallback(mFrameCallback);
+            mFramePosted = false;
+        }
 
         if (mTextSelectionCursorController != null) {
             // Might solve the following exception

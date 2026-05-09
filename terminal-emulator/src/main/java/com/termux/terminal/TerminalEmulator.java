@@ -2178,7 +2178,12 @@ public final class TerminalEmulator {
         mEffect = state.mSavedEffect;
         mForeColor = state.mSavedForeColor;
         mBackColor = state.mSavedBackColor;
-        int mask = (DECSET_BIT_AUTOWRAP | DECSET_BIT_ORIGIN_MODE);
+        // Restore the cursor-visible bit too (xterm does). A TUI that hides the
+        // cursor inside alt-screen via ?25l and exits via ?1049l without
+        // re-issuing ?25h would otherwise leave the cursor permanently hidden
+        // for the rest of the session — shouldCursorBeVisible() would return
+        // false forever.
+        int mask = (DECSET_BIT_AUTOWRAP | DECSET_BIT_ORIGIN_MODE | DECSET_BIT_CURSOR_ENABLED);
         mCurrentDecSetFlags = (mCurrentDecSetFlags & ~mask) | (state.mSavedDecFlags & mask);
         mUseLineDrawingG0 = state.mUseLineDrawingG0;
         mUseLineDrawingG1 = state.mUseLineDrawingG1;
@@ -3039,6 +3044,7 @@ public final class TerminalEmulator {
             case 1337: // iTerm image
                 // - https://iterm2.com/documentation-images.html
                 // - https://iterm2.com/documentation-escape-codes.html
+                if (argsLength < 5) break;
                 String controlCommandPrefix = mTerminalControlArgs.substring(5, Math.min(19, argsLength));
 
                 if (controlCommandPrefix.startsWith("File=") ||
@@ -3138,7 +3144,11 @@ public final class TerminalEmulator {
                     }
                     break;
                 } else if (controlCommandPrefix.startsWith("ReportCellSize")) {
-                    mSession.write(String.format(Locale.ENGLISH, "\0331337;ReportCellSize=%d;%d\007", mCellHeightPixels, mCellWidthPixels));
+                    // Proper OSC framing: ESC ] 1337 ; ... BEL. The previous
+                    // string was missing the ']' so the response was malformed.
+                    mSession.write(String.format(Locale.ENGLISH, "\033]1337;ReportCellSize=%d;%d\007", mCellHeightPixels, mCellWidthPixels));
+                    mITermImage = null;
+                    break;
                 }
 
                 // Free image from memory for any non `MultipartFile=` related commands.
@@ -3641,6 +3651,10 @@ public final class TerminalEmulator {
         // Initial wrap-around is not accurate but makes terminal more useful, especially on a small screen:
         setDecsetinternalBit(DECSET_BIT_AUTOWRAP, true);
         setDecsetinternalBit(DECSET_BIT_CURSOR_ENABLED, true);
+        // Re-arm the blink state. RIS / DECSTR clear the DEC flags but leave
+        // mCursorBlinkState whatever it was last toggled to — if the host
+        // blinker is paused that can leave the cursor stuck invisible.
+        setCursorBlinkState(true);
         mSavedDecSetFlags = mSavedStateMain.mSavedDecFlags = mSavedStateAlt.mSavedDecFlags = mCurrentDecSetFlags;
 
         // XXX: Should we set terminal driver back to IUTF8 with termios?
