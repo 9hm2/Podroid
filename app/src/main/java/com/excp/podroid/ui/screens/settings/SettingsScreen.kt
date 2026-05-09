@@ -52,7 +52,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -81,16 +83,20 @@ fun SettingsScreen(
     onThemeOrFontChanged: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
-    val darkTheme by viewModel.darkTheme.collectAsStateWithLifecycle(false)
+    // 8 form-style rows in one subscription via combine(...) in the ViewModel —
+    // single recomposition wave per emit instead of one per source flow.
+    val ui by viewModel.uiState.collectAsStateWithLifecycle()
+    val darkTheme = ui.darkTheme
+    val vmRamMb = ui.vmRamMb
+    val vmCpus = ui.vmCpus
+    val storageSizeGb = ui.storageSizeGb
+    val sshEnabled = ui.sshEnabled
+    val storageAccessEnabled = ui.storageAccessEnabled
+    val qemuExtraArgs = ui.qemuExtraArgs
+    val kernelExtraCmdline = ui.kernelExtraCmdline
+    // Kept separate — different cadence/consumer than the form rows.
     val portForwardRules by viewModel.portForwardRules.collectAsStateWithLifecycle()
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
-    val vmRamMb by viewModel.vmRamMb.collectAsStateWithLifecycle()
-    val vmCpus by viewModel.vmCpus.collectAsStateWithLifecycle()
-    val storageSizeGb by viewModel.storageSizeGb.collectAsStateWithLifecycle()
-    val sshEnabled by viewModel.sshEnabled.collectAsStateWithLifecycle(false)
-    val storageAccessEnabled by viewModel.storageAccessEnabled.collectAsStateWithLifecycle(false)
-    val qemuExtraArgs by viewModel.qemuExtraArgs.collectAsStateWithLifecycle()
-    val kernelExtraCmdline by viewModel.kernelExtraCmdline.collectAsStateWithLifecycle()
     var advancedExpanded by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
@@ -228,10 +234,12 @@ fun SettingsScreen(
                     )
                 } else {
                     portForwardRules.forEach { rule ->
-                        PortForwardRuleRow(
-                            rule = rule,
-                            onDelete = { viewModel.removePortForward(rule) },
-                        )
+                        key(rule.hostPort, rule.protocol) {
+                            PortForwardRuleRow(
+                                rule = rule,
+                                onDelete = { viewModel.removePortForward(rule) },
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -795,7 +803,13 @@ private fun AdvancedTextSetting(
 ) {
     // Editing is local; we only persist when the field loses focus. Avoids
     // round-tripping every keystroke through DataStore on a multi-line config field.
-    var localValue by remember(value) { mutableStateOf(value) }
+    // Don't reset local edits on every external emit — only sync when the upstream
+    // value actually drifts from what we have buffered (e.g. a Reset tap).
+    val localState = remember { mutableStateOf(value) }
+    var localValue by localState
+    LaunchedEffect(value) {
+        if (localValue != value) localValue = value
+    }
     var hadFocus by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {

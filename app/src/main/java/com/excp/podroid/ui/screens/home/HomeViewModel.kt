@@ -49,9 +49,13 @@ class HomeViewModel @Inject constructor(
 
     private fun checkForUpdate() {
         viewModelScope.launch {
-            val info = updateRepository.checkForUpdate(BuildConfig.VERSION_NAME) ?: return@launch
-            if (!updateRepository.isDismissed(info.latestVersion)) {
-                _updateInfo.value = info
+            try {
+                val info = updateRepository.checkForUpdate(BuildConfig.VERSION_NAME) ?: return@launch
+                if (!updateRepository.isDismissed(info.latestVersion)) {
+                    _updateInfo.value = info
+                }
+            } catch (_: Exception) {
+                // Network errors during init shouldn't crash the app — just skip.
             }
         }
     }

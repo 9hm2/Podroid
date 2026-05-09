@@ -11,6 +11,8 @@ import android.app.Application
 import android.util.Log
 import dagger.hilt.android.HiltAndroidApp
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @HiltAndroidApp
 class PodroidApplication : Application() {
@@ -21,10 +23,38 @@ class PodroidApplication : Application() {
     }
 
     private fun extractAssets() {
-        copyAssetDir("qemu", filesDir)
-        copyAssetIfNeeded("vmlinuz-virt", filesDir)
-        copyAssetIfNeeded("initrd.img", filesDir)
-        copyAssetIfNeeded("alpine-rootfs.squashfs", filesDir)
+        // Fan out the four top-level extractions across a small thread pool.
+        // Disk-write throughput is the bottleneck for the squashfs (~41 MB),
+        // but decompression, asset-FD lookup, and skip-when-size-matches all
+        // overlap usefully across threads. Must complete before onCreate
+        // returns — the QEMU launch path reads these files synchronously.
+        val tasks: List<() -> Unit> = listOf(
+            { copyAssetDir("qemu", filesDir) },
+            { copyAssetIfNeeded("vmlinuz-virt", filesDir) },
+            { copyAssetIfNeeded("initrd.img", filesDir) },
+            { copyAssetIfNeeded("alpine-rootfs.squashfs", filesDir) },
+        )
+        val pool = Executors.newFixedThreadPool(tasks.size.coerceAtMost(4))
+        try {
+            // invokeAll blocks until every Callable finishes (or times out).
+            // Each Callable wraps the task so a thrown exception is captured
+            // in the returned Future rather than killing the worker silently.
+            val futures = pool.invokeAll(tasks.map { task ->
+                java.util.concurrent.Callable<Unit> { task() }
+            })
+            for (f in futures) {
+                try { f.get() } catch (e: Exception) {
+                    // copyAssetIfNeeded / copyAssetFileIfNeeded already log
+                    // their own failures; this catches anything that escaped.
+                    Log.w(TAG, "Asset extraction task failed", e)
+                }
+            }
+        } finally {
+            pool.shutdown()
+            if (!pool.awaitTermination(5, TimeUnit.SECONDS)) {
+                pool.shutdownNow()
+            }
+        }
     }
 
     /**

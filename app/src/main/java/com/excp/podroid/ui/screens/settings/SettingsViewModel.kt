@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +34,24 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import javax.inject.Inject
+
+/**
+ * Snapshot of the form-style settings rows that SettingsScreen reads together.
+ * Combined into one StateFlow so an emit on any one source produces a single
+ * recomposition instead of one per source. Does *not* include flows with
+ * different update cadences or consumers (vmState, portForwardRules, updateInfo,
+ * terminal-only theme/font/size) — those stay separate.
+ */
+data class SettingsUiState(
+    val vmRamMb: Int = 512,
+    val vmCpus: Int = 1,
+    val storageSizeGb: Int = 2,
+    val sshEnabled: Boolean = false,
+    val storageAccessEnabled: Boolean = false,
+    val qemuExtraArgs: String = SettingsRepository.DEFAULT_QEMU_EXTRA_ARGS,
+    val kernelExtraCmdline: String = SettingsRepository.DEFAULT_KERNEL_EXTRA_CMDLINE,
+    val darkTheme: Boolean = false,
+)
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
@@ -64,6 +83,43 @@ class SettingsViewModel @Inject constructor(
 
     val kernelExtraCmdline: StateFlow<String> = settingsRepository.kernelExtraCmdline
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_KERNEL_EXTRA_CMDLINE)
+
+    /**
+     * Single combined stream of the 8 form-style rows. SettingsScreen can collect
+     * this once with collectAsStateWithLifecycle instead of subscribing 8 times.
+     * The original per-flow StateFlows above are kept so callers that want one
+     * value (e.g. the About section reading storageSizeGb) don't pay for the
+     * combined object on every emit.
+     */
+    val uiState: StateFlow<SettingsUiState> = combine(
+        combine(
+            settingsRepository.vmRamMb,
+            settingsRepository.vmCpus,
+            settingsRepository.storageSizeGb,
+            settingsRepository.sshEnabled,
+        ) { ram, cpus, storage, ssh ->
+            arrayOf(ram, cpus, storage, ssh)
+        },
+        combine(
+            settingsRepository.storageAccessEnabled,
+            settingsRepository.qemuExtraArgs,
+            settingsRepository.kernelExtraCmdline,
+            settingsRepository.darkTheme,
+        ) { storageAccess, qemu, kernel, dark ->
+            arrayOf(storageAccess, qemu, kernel, dark)
+        },
+    ) { a, b ->
+        SettingsUiState(
+            vmRamMb = a[0] as Int,
+            vmCpus = a[1] as Int,
+            storageSizeGb = a[2] as Int,
+            sshEnabled = a[3] as Boolean,
+            storageAccessEnabled = b[0] as Boolean,
+            qemuExtraArgs = b[1] as String,
+            kernelExtraCmdline = b[2] as String,
+            darkTheme = b[3] as Boolean,
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsUiState())
 
     fun setQemuExtraArgs(value: String) {
         viewModelScope.launch { settingsRepository.setQemuExtraArgs(value) }
