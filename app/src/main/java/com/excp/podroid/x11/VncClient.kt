@@ -181,4 +181,34 @@ object VncClient {
             }
         }
     }
+
+    private const val MSG_KEY_EVENT: Byte = 4
+    private const val MSG_POINTER_EVENT: Byte = 5
+
+    /**
+     * Sends a PointerEvent. `buttonMask` bit i = button (i+1) pressed.
+     * Bit 0 = left, 1 = middle, 2 = right, 3 = scroll-up, 4 = scroll-down.
+     */
+    fun sendPointer(out: OutputStream, x: Int, y: Int, buttonMask: Int) {
+        val buf = java.nio.ByteBuffer.allocate(6)
+        buf.put(MSG_POINTER_EVENT)
+        buf.put(buttonMask.toByte())
+        buf.putShort(x.toShort())
+        buf.putShort(y.toShort())
+        out.write(buf.array())
+        out.flush()
+    }
+
+    /**
+     * Sends a KeyEvent. `keysym` is an X11 keysym (e.g. 0x61 for 'a').
+     */
+    fun sendKey(out: OutputStream, keysym: Int, down: Boolean) {
+        val buf = java.nio.ByteBuffer.allocate(8)
+        buf.put(MSG_KEY_EVENT)
+        buf.put(if (down) 1.toByte() else 0)
+        buf.putShort(0)
+        buf.putInt(keysym)
+        out.write(buf.array())
+        out.flush()
+    }
 }
