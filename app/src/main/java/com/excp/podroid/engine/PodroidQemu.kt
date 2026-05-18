@@ -52,6 +52,7 @@ import javax.inject.Singleton
 @Singleton
 class PodroidQemu @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val settingsRepository: com.excp.podroid.data.repository.SettingsRepository,
 ) {
     private val _state = MutableStateFlow<VmState>(VmState.Idle)
     val state: StateFlow<VmState> = _state.asStateFlow()
@@ -84,6 +85,8 @@ class PodroidQemu @Inject constructor(
     val qmpClient: QmpClient by lazy { QmpClient(qmpSocketPath) }
 
     private var ioScope: CoroutineScope? = null
+
+    private var bootStartTime: Long = 0L
 
     private val consoleBuilder = StringBuilder()
     private val maxConsoleSize = 64 * 1024
@@ -138,6 +141,15 @@ class PodroidQemu @Inject constructor(
         } catch (e: Exception) {
             Log.w(TAG, "Error closing boot socket: ${e.message}")
         }
+    }
+
+    private fun persistBootDuration() {
+        if (bootStartTime == 0L) return
+        val duration = System.currentTimeMillis() - bootStartTime
+        bootStartTime = 0L
+        // ioScope is the same scope launched in start(); always non-null here
+        // because we're called from inside it.
+        ioScope?.launch { settingsRepository.setLastBootDurationMs(duration) }
     }
 
     private fun autoStartBridge() {
@@ -233,6 +245,7 @@ class PodroidQemu @Inject constructor(
         ensureStorageImage(config.storageSizeGb)
 
         cleanedUp.set(false)
+        bootStartTime = System.currentTimeMillis()
         _state.value = VmState.Starting
         consoleBuilder.clear()
         _consoleText.value = ""
@@ -307,6 +320,7 @@ class PodroidQemu @Inject constructor(
                 if (_state.value is VmState.Starting) {
                     Log.w(TAG, "Boot timeout fallback → forcing Running state")
                     _bootStage.value = "Ready"
+                    persistBootDuration()
                     _state.value = VmState.Running
                     autoStartBridge()
                 }
@@ -432,6 +446,7 @@ class PodroidQemu @Inject constructor(
         when {
             text.contains("Ready!") -> {
                 _bootStage.value = "Ready"
+                persistBootDuration()
                 _state.value = VmState.Running
                 autoStartBridge()
             }

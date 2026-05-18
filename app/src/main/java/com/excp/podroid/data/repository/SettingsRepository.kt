@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -44,6 +45,7 @@ class SettingsRepository @Inject constructor(
         val KEY_SHOW_EXTRA_KEYS        = booleanPreferencesKey("show_extra_keys")
         val KEY_HAPTICS_ENABLED        = booleanPreferencesKey("haptics_enabled")
         val KEY_DYNAMIC_COLOR_ENABLED  = booleanPreferencesKey("dynamic_color_enabled")
+        val KEY_LAST_BOOT_DURATION_MS  = longPreferencesKey("last_boot_duration_ms")
 
         /**
          * Default tunable QEMU args — CPU model, accel tuning, RNG source, overcommit.
@@ -100,6 +102,7 @@ class SettingsRepository @Inject constructor(
     val showExtraKeys        = pref(KEY_SHOW_EXTRA_KEYS, true)
     val hapticsEnabled       = pref(KEY_HAPTICS_ENABLED, true)
     val dynamicColorEnabled  = pref(KEY_DYNAMIC_COLOR_ENABLED, false)
+    val lastBootDurationMs   = pref(KEY_LAST_BOOT_DURATION_MS, 0L)
 
     suspend fun setDarkTheme(value: Boolean)             = set(KEY_DARK_THEME, value)
     suspend fun setVmRamMb(value: Int)                   = set(KEY_VM_RAM, value)
@@ -116,6 +119,7 @@ class SettingsRepository @Inject constructor(
     suspend fun setShowExtraKeys(value: Boolean)         = set(KEY_SHOW_EXTRA_KEYS, value)
     suspend fun setHapticsEnabled(value: Boolean)        = set(KEY_HAPTICS_ENABLED, value)
     suspend fun setDynamicColorEnabled(value: Boolean)   = set(KEY_DYNAMIC_COLOR_ENABLED, value)
+    suspend fun setLastBootDurationMs(value: Long)       = set(KEY_LAST_BOOT_DURATION_MS, value)
 
     // Snapshots used by non-Compose call sites (PodroidService, exporters).
     suspend fun getSshEnabledSnapshot()           = sshEnabled.first()

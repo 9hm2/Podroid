@@ -2,7 +2,6 @@ package com.excp.podroid.ui.screens.home
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,31 +10,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.windowsizeclass.WindowHeightSizeClass
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
@@ -43,14 +30,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.excp.podroid.BuildConfig
 import com.excp.podroid.engine.VmState
 import com.excp.podroid.ui.components.AdaptiveContainer
+import com.excp.podroid.ui.components.PodroidDestructiveButton
+import com.excp.podroid.ui.components.PodroidGhostButton
+import com.excp.podroid.ui.components.PodroidListRow
+import com.excp.podroid.ui.components.PodroidPrimaryButton
+import com.excp.podroid.ui.components.PodroidSectionLabel
+import com.excp.podroid.ui.components.PodroidStatus
+import com.excp.podroid.ui.components.PodroidStatusColors
+import com.excp.podroid.ui.components.PodroidTopBar
+import com.excp.podroid.ui.theme.PodroidTokens
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,41 +58,36 @@ fun HomeScreen(
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
     val bootStage by viewModel.bootStage.collectAsStateWithLifecycle()
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
+    val meta by viewModel.meta.collectAsStateWithLifecycle()
+    val uptimeTick by viewModel.uptimeTicker.collectAsStateWithLifecycle()
 
-    val isRunning = vmState is VmState.Running
+    val isRunning  = vmState is VmState.Running
     val isStarting = vmState is VmState.Starting
+    val uptimeLabel = viewModel.uptimeLabel(uptimeTick)
+    val phoneIp = viewModel.phoneIp()
 
-    // Update dialog
     updateInfo?.let { info ->
         AlertDialog(
             onDismissRequest = { viewModel.dismissUpdate() },
-            icon = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
+            icon  = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
             title = { Text("Update available") },
-            text = {
-                Text("Version ${info.latestVersion} is available. You have ${BuildConfig.VERSION_NAME}.")
-            },
+            text  = { Text("Version ${info.latestVersion} is available. You have ${BuildConfig.VERSION_NAME}.") },
             confirmButton = {
-                Button(onClick = {
+                TextButton(onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.releaseUrl)))
                     viewModel.dismissUpdate()
-                }) {
-                    Text("Download")
-                }
+                }) { Text("Download") }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.dismissUpdate() }) {
-                    Text("Later")
-                }
+                TextButton(onClick = { viewModel.dismissUpdate() }) { Text("Later") }
             },
         )
     }
 
-    val isCompactHeight = windowSizeClass.heightSizeClass == WindowHeightSizeClass.Compact
-
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Podroid") },
+            PodroidTopBar(
+                title = "Podroid",
                 actions = {
                     IconButton(onClick = onNavigateToSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -106,7 +95,9 @@ fun HomeScreen(
                 },
             )
         },
+        containerColor = MaterialTheme.colorScheme.background,
     ) { innerPadding ->
+        val isCompactHeight = windowSizeClass.heightSizeClass == WindowHeightSizeClass.Compact
         AdaptiveContainer(
             windowSizeClass = windowSizeClass,
             modifier = Modifier
@@ -115,31 +106,32 @@ fun HomeScreen(
             maxWidth = if (isCompactHeight) 900 else 600,
         ) {
             if (isCompactHeight) {
-                // Landscape phone: hero on left, action buttons on right
+                // Landscape phone / split-screen: hero on left, action column on right.
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                        .padding(horizontal = PodroidTokens.Spacing.XL2, vertical = PodroidTokens.Spacing.LG),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(
-                        modifier = Modifier.weight(1f),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = PodroidTokens.Spacing.XL2)
+                            .verticalScroll(rememberScrollState()),
                     ) {
-                        StatusHero(isStarting = isStarting, isRunning = isRunning, bootStage = bootStage, iconSize = 64)
+                        HomeStatusBlock(isStarting, isRunning, vmState, bootStage, meta, uptimeLabel)
+                        HomeDataSection(isRunning, vmState, meta, phoneIp)
                     }
-                    Spacer(Modifier.width(24.dp))
                     Column(
                         modifier = Modifier
                             .weight(1f)
                             .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.SM),
                     ) {
                         HomeActionButtons(
-                            vmState = vmState,
                             isRunning = isRunning,
                             isStarting = isStarting,
+                            vmState = vmState,
                             onStart = { viewModel.startPodroid() },
                             onStop = { viewModel.stopVm() },
                             onRestart = { viewModel.restartVm() },
@@ -148,34 +140,27 @@ fun HomeScreen(
                     }
                 }
             } else {
-                // Portrait / tall: vertical stack
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                        .padding(horizontal = PodroidTokens.Spacing.XL),
+                    verticalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.MD),
                 ) {
-                    Spacer(modifier = Modifier.height(24.dp))
-                    StatusHero(isStarting = isStarting, isRunning = isRunning, bootStage = bootStage, iconSize = 72)
+                    Spacer(Modifier.height(PodroidTokens.Spacing.XL))
+                    HomeStatusBlock(isStarting, isRunning, vmState, bootStage, meta, uptimeLabel)
+                    HomeDataSection(isRunning, vmState, meta, phoneIp)
+                    Spacer(Modifier.weight(1f))
                     HomeActionButtons(
-                        vmState = vmState,
                         isRunning = isRunning,
                         isStarting = isStarting,
+                        vmState = vmState,
                         onStart = { viewModel.startPodroid() },
                         onStop = { viewModel.stopVm() },
                         onRestart = { viewModel.restartVm() },
                         onOpenTerminal = onNavigateToTerminal,
                     )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "Alpine Linux · Podman · QEMU",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(PodroidTokens.Spacing.XL))
                 }
             }
         }
@@ -183,134 +168,132 @@ fun HomeScreen(
 }
 
 @Composable
-private fun StatusHero(
+private fun HomeStatusBlock(
     isStarting: Boolean,
     isRunning: Boolean,
+    vmState: VmState,
     bootStage: String,
-    iconSize: Int,
+    meta: HomeMeta,
+    uptimeLabel: String?,
 ) {
-    Box(modifier = Modifier.size(iconSize.dp), contentAlignment = Alignment.Center) {
-        if (isStarting) {
-            com.excp.podroid.ui.screens.home.AnimatedBootProgress(
-                bootStage = bootStage,
-                modifier = Modifier.size(iconSize.dp)
-            )
-        } else {
-            Icon(
-                imageVector = Icons.Default.Terminal,
-                contentDescription = null,
-                modifier = Modifier.size(iconSize.dp),
-                tint = if (isRunning)
-                    MaterialTheme.colorScheme.primary
-                else
-                    MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    PodroidSectionLabel("VM Status")
+    Text(
+        text = when {
+            isStarting -> "Starting"
+            isRunning  -> "Running"
+            else       -> "Stopped"
+        },
+        style = MaterialTheme.typography.displayLarge,
+        color = when {
+            isRunning  -> MaterialTheme.colorScheme.primary
+            isStarting -> MaterialTheme.colorScheme.tertiary
+            else       -> MaterialTheme.colorScheme.onSurface
+        },
+    )
+    Spacer(Modifier.height(PodroidTokens.Spacing.SM))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val (dot, label) = when {
+            isRunning  -> PodroidStatusColors.Running  to (uptimeLabel ?: "Up")
+            isStarting -> PodroidStatusColors.Starting to bootStage.ifEmpty { "Starting" }
+            else       -> PodroidStatusColors.Stopped  to "Idle"
         }
-    }
-    Spacer(Modifier.height(16.dp))
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        PodroidStatus(label = label, dotColor = dot)
         Text(
-            text = when {
-                isStarting -> "Starting…"
-                isRunning  -> "VM is running"
-                else       -> "VM is stopped"
-            },
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = when {
-                isStarting -> MaterialTheme.colorScheme.primary
-                isRunning  -> MaterialTheme.colorScheme.primary
-                else       -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
+            text = meta.resourcesLabel,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (isStarting && bootStage.isNotEmpty()) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = bootStage,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
+    }
+    if (vmState is VmState.Error) {
+        Spacer(Modifier.height(PodroidTokens.Spacing.MD))
+        PodroidSectionLabel("Error")
+        Text(
+            text = vmState.message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    // Starting state: the meta row already shows the amber dot + boot-stage
+    // text, which is the canonical boot indicator. No need for a separate ring.
+}
+
+@Composable
+private fun HomeDataSection(
+    isRunning: Boolean,
+    vmState: VmState,
+    meta: HomeMeta,
+    phoneIp: String,
+) {
+    val showStarting = vmState is VmState.Starting
+    val showError = vmState is VmState.Error
+    if (showStarting || showError) return
+    Spacer(Modifier.height(PodroidTokens.Spacing.MD))
+    if (isRunning) {
+        PodroidSectionLabel("Network")
+        PodroidListRow(label = "Phone IP", value = phoneIp, mono = true)
+        PodroidListRow(
+            label = "SSH",
+            value = if (meta.sshEnabled) ":9922 · podroid" else "Off",
+            mono = meta.sshEnabled,
+        )
+        PodroidListRow(
+            label = "Port forwards",
+            value = if (meta.portForwardCount == 0) "None" else "${meta.portForwardCount} active",
+        )
+    } else {
+        PodroidSectionLabel("Last session")
+        if (meta.lastBootDurationMs > 0L) {
+            PodroidListRow(
+                label = "Booted in",
+                value = formatBootDuration(meta.lastBootDurationMs),
             )
         }
+        PodroidListRow(
+            label = "Build",
+            value = "v${BuildConfig.VERSION_NAME} · QEMU ${BuildConfig.QEMU_VERSION}",
+            mono = true,
+        )
+    }
+}
+
+private fun formatBootDuration(ms: Long): String {
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    return if (totalSec >= 60) {
+        val m = totalSec / 60
+        val s = totalSec % 60
+        if (s == 0L) "${m}m" else "${m}m ${s}s"
+    } else {
+        val tenths = (ms / 100) % 10
+        if (tenths == 0L) "${totalSec}s" else "${totalSec}.${tenths}s"
     }
 }
 
 @Composable
 private fun HomeActionButtons(
-    vmState: VmState,
     isRunning: Boolean,
     isStarting: Boolean,
+    vmState: VmState,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onRestart: () -> Unit,
     onOpenTerminal: () -> Unit,
 ) {
-    Button(
-        onClick = { if (isRunning || isStarting) onStop() else onStart() },
-        modifier = Modifier.fillMaxWidth().height(56.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isRunning || isStarting)
-                MaterialTheme.colorScheme.error
-            else
-                MaterialTheme.colorScheme.primary,
-        ),
-    ) {
-        Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = if (isRunning || isStarting) "Stop VM" else "Start VM",
-            style = MaterialTheme.typography.titleMedium,
-        )
-    }
     if (isRunning) {
-        FilledTonalButton(
-            onClick = onRestart,
-            modifier = Modifier.fillMaxWidth().height(48.dp),
-            shape = RoundedCornerShape(16.dp),
-        ) {
-            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Restart VM")
+        PodroidPrimaryButton(text = "Open Terminal", onClick = onOpenTerminal)
+        Spacer(Modifier.height(PodroidTokens.Spacing.SM))
+        Row(horizontalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.SM)) {
+            PodroidGhostButton(text = "Restart", onClick = onRestart, modifier = Modifier.weight(1f))
+            PodroidDestructiveButton(text = "Stop", onClick = onStop, modifier = Modifier.weight(1f))
         }
-    }
-    if (vmState is VmState.Error) {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = vmState.message,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = onStart,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Try again")
-                }
-            }
-        }
-    }
-    if (isRunning) {
-        FilledTonalButton(
-            onClick = onOpenTerminal,
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            shape = RoundedCornerShape(16.dp),
-        ) {
-            Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = "Open Terminal",
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
+    } else if (isStarting) {
+        PodroidDestructiveButton(text = "Stop", onClick = onStop)
+    } else if (vmState is VmState.Error) {
+        PodroidPrimaryButton(text = "Try again", onClick = onStart)
+    } else {
+        PodroidPrimaryButton(text = "Start VM", onClick = onStart)
     }
 }
