@@ -31,6 +31,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -98,6 +99,11 @@ class AvfEngine @Inject constructor(
     private var consoleStream: java.io.InputStream? = null
     private var consoleStreamInput: java.io.OutputStream? = null
     private var fanout: ConsoleFanout? = null
+    /** Initial rules captured from start()'s portForwards arg — replayed when the control channel comes up. */
+    private val initialRules = mutableListOf<com.excp.podroid.data.repository.PortForwardRule>()
+    private var control: VsockControlChannel? = null
+    /** vport → forwarder. The diff loop in EngineHolder is the single writer. */
+    private val forwarders = java.util.concurrent.ConcurrentHashMap<Int, VsockPortForwarder>()
 
     val terminalSockPath: String get() = "${context.filesDir.absolutePath}/avf-terminal.sock"
     val ctrlSockPath: String get() = "${context.filesDir.absolutePath}/avf-ctrl.sock"
@@ -116,12 +122,38 @@ class AvfEngine @Inject constructor(
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             runCatching { terminalSession?.emulator?.append(reset, reset.size) }
         }
+        // Bring up the vsock control channel and replay initial forwards.
+        // EngineHolder's diff loop will keep the set in sync from here on.
+        val vm = vmHandle
+        if (vm != null) {
+            val ctl = VsockControlChannel(vm, scope)
+            control = ctl
+            ctl.open()
+            scope.launch {
+                for (rule in initialRules) {
+                    runCatching {
+                        // Same convention as addPortForward: vport = hostPort.
+                        val fw = VsockPortForwarder(
+                            hostPort = rule.hostPort,
+                            guestVsockPort = rule.hostPort,
+                            vm = vm,
+                            scope = scope,
+                        ).also { it.start() }
+                        forwarders[rule.hostPort] = fw
+                        ctl.addForward(rule.hostPort, "127.0.0.1", rule.guestPort)
+                    }.onFailure { Log.w(TAG, "initial-rule replay failed for $rule", it) }
+                }
+            }
+        }
     }
 
     override suspend fun start(portForwards: List<PortForwardRule>, config: VmConfig) {
         if (_state.value is VmState.Running || _state.value is VmState.Starting) return
-        if (portForwards.isNotEmpty()) {
-            Log.w(TAG, "${portForwards.size} port-forward rule(s) requested — ignored on AVF (future milestone)")
+        initialRules.clear()
+        initialRules.addAll(portForwards.filter { it.protocol == "tcp" })
+        if (portForwards.any { it.protocol != "tcp" }) {
+            Log.w(TAG, "AVF supports TCP only; UDP/non-TCP rules ignored: " +
+                "${portForwards.filter { it.protocol != "tcp" }}")
         }
         _state.value = VmState.Starting
         _bootStage.value = "Initializing AVF..."
@@ -236,16 +268,44 @@ class AvfEngine @Inject constructor(
         cleanup()
     }
 
-    /**
-     * Live port-forward add. Wired up to a VsockPortForwarder in Task 9; until
-     * then logs and no-ops so EngineHolder's diff loop can run safely.
-     */
-    override suspend fun addPortForward(rule: PortForwardRule) {
-        Log.w(TAG, "addPortForward($rule) — AVF live forwarding not yet wired up (stub)")
+    override suspend fun addPortForward(rule: com.excp.podroid.data.repository.PortForwardRule) {
+        if (_state.value !is VmState.Running) return
+        val vm = vmHandle ?: return
+        if (rule.protocol != "tcp") {
+            Log.w(TAG, "addPortForward($rule) — AVF supports TCP only; rule ignored")
+            return
+        }
+        // Idempotent: if a forwarder is already running for this hostPort, no-op.
+        if (forwarders.containsKey(rule.hostPort)) {
+            Log.d(TAG, "addPortForward($rule) — forwarder already exists for ${rule.hostPort}")
+            return
+        }
+        try {
+            // Convention: vsock port == hostPort. The guest agent listens on
+            // vsock:hostPort and splices to tcp 127.0.0.1:guestPort. Using
+            // hostPort (which is unique per Android-side rule) instead of
+            // guestPort avoids vsock-port collisions when two rules target
+            // the same service inside the VM (e.g. 8080→80 + 9090→80).
+            val fw = VsockPortForwarder(
+                hostPort = rule.hostPort,
+                guestVsockPort = rule.hostPort,
+                vm = vm,
+                scope = scope,
+            ).also { it.start() }
+            forwarders[rule.hostPort] = fw
+            control?.addForward(rule.hostPort, "127.0.0.1", rule.guestPort)
+            Log.i(TAG, "live forward up: 0.0.0.0:${rule.hostPort} → vsock:${rule.hostPort} → 127.0.0.1:${rule.guestPort}")
+        } catch (e: Throwable) {
+            Log.w(TAG, "addPortForward($rule) failed", e)
+        }
     }
 
-    override suspend fun removePortForward(rule: PortForwardRule) {
-        Log.w(TAG, "removePortForward($rule) — AVF live forwarding not yet wired up (stub)")
+    override suspend fun removePortForward(rule: com.excp.podroid.data.repository.PortForwardRule) {
+        if (rule.protocol != "tcp") return
+        val fw = forwarders.remove(rule.hostPort) ?: return
+        runCatching { fw.close() }
+        runCatching { control?.removeForward(rule.hostPort) }
+        Log.i(TAG, "live forward down: 0.0.0.0:${rule.hostPort}")
     }
 
     override fun createTerminalSession(client: TerminalSessionClient): TerminalSession {
@@ -275,7 +335,13 @@ class AvfEngine @Inject constructor(
     }
 
     private fun cleanup() {
-        // Close fanout first — drains its coroutines and closes the streams inside.
+        // Tear down forwarders + control before draining the fanout so the
+        // VM doesn't see late vsock connect attempts after onStopped.
+        forwarders.values.forEach { runCatching { it.close() } }
+        forwarders.clear()
+        runCatching { control?.close() }
+        control = null
+        // Close fanout next — drains its coroutines and closes the streams inside.
         runCatching { fanout?.close() }
         fanout = null
         runCatching { consoleStreamInput?.close() }
