@@ -24,7 +24,7 @@ start() {
     fi
     ip link set "$NETIF" up
 
-    if grep -q 'podroid\.tty=ttyS0' /proc/cmdline 2>/dev/null; then
+    if grep -q 'podroid\.backend=avf' /proc/cmdline 2>/dev/null; then
         # AVF backend: crosvm wires the guest to a TAP that Android's tethering
         # manager runs DHCP on. The lease decides our IP / gateway / DNS — the
         # SLIRP-style 10.0.2.15 hardcode won't sit on the right subnet (on

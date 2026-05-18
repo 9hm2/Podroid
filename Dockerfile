@@ -114,6 +114,9 @@ RUN printf '%s\n' \
     'CONFIG_SECURITY_APPARMOR=y' \
     'CONFIG_IP6_NF_MANGLE=y' \
     'CONFIG_BINFMT_MISC=y' \
+    'CONFIG_VSOCKETS=y' \
+    'CONFIG_VSOCKETS_DIAG=y' \
+    'CONFIG_VIRTIO_VSOCKETS=y' \
     > /tmp/forced_builtin.config
 RUN cd linux-${KERNEL_VERSION} \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig \
@@ -131,7 +134,8 @@ RUN cd linux-${KERNEL_VERSION} \
                   VETH TUN NF_TABLES NF_NAT NETFILTER OVERLAY_FS FUSE_FS \
                   EXT4_FS_SECURITY SQUASHFS_XATTR SQUASHFS_ZSTD \
                   DECOMPRESS_ZSTD ZSTD_DECOMPRESS \
-                  IKCONFIG IKCONFIG_PROC BINFMT_MISC; do \
+                  IKCONFIG IKCONFIG_PROC BINFMT_MISC \
+                  VSOCKETS VIRTIO_VSOCKETS; do \
            grep -q "^CONFIG_${opt}=y\$" .config \
                || { echo "FATAL: CONFIG_${opt} is not =y after merge" >&2; \
                     grep "CONFIG_${opt}" .config >&2; exit 1; }; \

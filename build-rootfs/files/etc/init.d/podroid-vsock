@@ -1,21 +1,37 @@
 #!/sbin/openrc-run
 description="Podroid vsock control + port forwarding agent (AVF only)"
-command="/usr/local/bin/podroid-vsock-agent"
-command_background="yes"
 pidfile="/run/podroid-vsock-agent.pid"
-output_log="/var/log/podroid-vsock-agent.log"
-error_log="/var/log/podroid-vsock-agent.log"
 
 depend() {
     need podroid-bootstrap
     before podroid-ready
 }
 
-start_pre() {
-    # AVF-only: the QEMU backend never bound an AF_VSOCK socket — skip on QEMU.
-    if ! grep -q 'podroid\.tty=ttyS0' /proc/cmdline 2>/dev/null; then
-        ewarn "Not an AVF boot — skipping podroid-vsock"
-        return 1
+start() {
+    # AVF-only: QEMU's kernel has no AF_VSOCK, so the agent would just fail to
+    # bind. Skip cleanly via mark_service_inactive — that's OpenRC's idiom for
+    # "this service intentionally didn't start" and produces a one-line
+    # "skipping" message instead of "* ERROR: <svc> failed to start" (which
+    # is what `start_pre` returning non-zero would yield).
+    if ! grep -q 'podroid\.backend=avf' /proc/cmdline 2>/dev/null; then
+        einfo "Not an AVF boot — skipping podroid-vsock"
+        mark_service_inactive
+        return 0
     fi
-    return 0
+    ebegin "Starting podroid-vsock-agent"
+    start-stop-daemon --start --background \
+        --make-pidfile --pidfile "$pidfile" \
+        --stdout /var/log/podroid-vsock-agent.log \
+        --stderr /var/log/podroid-vsock-agent.log \
+        --exec /usr/local/bin/podroid-vsock-agent
+    eend $?
+}
+
+stop() {
+    if [ -f "$pidfile" ]; then
+        ebegin "Stopping podroid-vsock-agent"
+        start-stop-daemon --stop --pidfile "$pidfile"
+        rm -f "$pidfile"
+        eend $?
+    fi
 }

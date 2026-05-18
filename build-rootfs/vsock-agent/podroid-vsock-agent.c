@@ -56,14 +56,29 @@
 
 /* ── Logging ─────────────────────────────────────────────────────────────── */
 
+/*
+ * Single-syscall log. fprintf+vfprintf+fprintf+fflush issues 3–4 write()s
+ * which under fork() interleave at the byte level across child processes
+ * (we saw "podroid-vsock-agent [error] podroid-vsock-agent [error] ctl
+ * socket() failed: ...vsock socket() failed: ..." mixed in /var/log).
+ * write(2, buf, n) is atomic for n < PIPE_BUF (4096) on Linux for regular
+ * files and pipes — formatting the whole line into a stack buffer then
+ * issuing one write() guarantees ordering even with many forked listeners.
+ */
 static void logmsg(const char *level, const char *fmt, ...) {
-    fprintf(stderr, "%s [%s] ", LOG_TAG, level);
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "%s [%s] ", LOG_TAG, level);
+    if (n < 0 || n >= (int)sizeof(buf) - 2) return;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    int m = vsnprintf(buf + n, sizeof(buf) - n - 2, fmt, ap);
     va_end(ap);
-    fprintf(stderr, "\n");
-    fflush(stderr);
+    if (m < 0) return;
+    int total = n + m;
+    if (total > (int)sizeof(buf) - 2) total = sizeof(buf) - 2;
+    buf[total]     = '\n';
+    buf[total + 1] = '\0';
+    (void)write(2, buf, (size_t)(total + 1));
 }
 
 #define LOG_I(...) logmsg("info",  __VA_ARGS__)
@@ -243,11 +258,15 @@ static void remove_config_line(int vport) {
 /* ── Control command handlers ───────────────────────────────────────────── */
 
 static void handle_resize(int rows, int cols) {
-    int fd = open("/dev/ttyS0", O_RDONLY | O_NOCTTY);
+    /* /dev/hvc0 since the perf fix — virtio-console runs at line-rate,
+     * unlike the old PL011 ttyS0 path that throttled TUI redraws to
+     * ~14 KB/s. The getty also moved to hvc0 (per podroid-getty + the
+     * `podroid.tty=hvc0` cmdline marker AVF now passes). */
+    int fd = open("/dev/hvc0", O_RDONLY | O_NOCTTY);
     if (fd >= 0) {
         struct winsize ws = { .ws_row = (unsigned short)rows, .ws_col = (unsigned short)cols };
         if (ioctl(fd, TIOCSWINSZ, &ws) < 0) {
-            LOG_W("TIOCSWINSZ /dev/ttyS0 failed: %s", strerror(errno));
+            LOG_W("TIOCSWINSZ /dev/hvc0 failed: %s", strerror(errno));
         }
         close(fd);
     }
