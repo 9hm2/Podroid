@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -151,6 +152,9 @@ static int tcp_connect(const char *host, int port) {
     if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         close(s); return -1;
     }
+    /* Interactive forwards (SSH, VNC) get Nagle-delayed without this. */
+    int one = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     return s;
 }
 
@@ -193,14 +197,6 @@ static void tcp_listener_main(int vport, const char *host, int gport) {
 }
 
 /* ── Config parsing & live edits ────────────────────────────────────────── */
-
-static int parse_uint(const char *s, int *out) {
-    char *end = NULL;
-    long v = strtol(s, &end, 10);
-    if (end == s || v < 0 || v > 65535) return -1;
-    *out = (int)v;
-    return 0;
-}
 
 /* Spawn a TCP listener child and remember its PID. Idempotent on vport. */
 static int spawn_tcp_listener(int vport, const char *host, int gport) {
@@ -349,7 +345,8 @@ static void parse_config_and_bootstrap(const char *path) {
             char host[64] = {0};
             int gport = 0;
             if (sscanf(p, "%d %*s %63s %d", &vport, host, &gport) == 3) {
-                spawn_tcp_listener(vport, host, gport);
+                if (spawn_tcp_listener(vport, host, gport) != 0)
+                    LOG_W("startup: spawn listener for vsock:%d failed", vport);
             }
         }
     }
@@ -402,8 +399,7 @@ int main(int argc, char **argv) {
     for (;;) {
         int c = accept(s, NULL, NULL);
         if (c < 0) { if (errno == EINTR) continue; break; }
-        ctl_loop(c);  // runs to EOF; we accept the next connection after
-        close(c);
+        ctl_loop(c);  // ctl_loop takes ownership of `c` via fdopen — don't close here
     }
     return 0;
 }
