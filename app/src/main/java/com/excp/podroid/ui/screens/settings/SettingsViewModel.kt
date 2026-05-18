@@ -51,6 +51,7 @@ data class SettingsUiState(
     val qemuExtraArgs: String = SettingsRepository.DEFAULT_QEMU_EXTRA_ARGS,
     val kernelExtraCmdline: String = SettingsRepository.DEFAULT_KERNEL_EXTRA_CMDLINE,
     val darkTheme: Boolean = false,
+    val dynamicColorEnabled: Boolean = false,
 )
 
 @HiltViewModel
@@ -105,8 +106,9 @@ class SettingsViewModel @Inject constructor(
             settingsRepository.qemuExtraArgs,
             settingsRepository.kernelExtraCmdline,
             settingsRepository.darkTheme,
-        ) { storageAccess, qemu, kernel, dark ->
-            arrayOf(storageAccess, qemu, kernel, dark)
+            settingsRepository.dynamicColorEnabled,
+        ) { storageAccess, qemu, kernel, dark, dyn ->
+            arrayOf(storageAccess, qemu, kernel, dark, dyn)
         },
     ) { a, b ->
         SettingsUiState(
@@ -118,6 +120,7 @@ class SettingsViewModel @Inject constructor(
             qemuExtraArgs = b[1] as String,
             kernelExtraCmdline = b[2] as String,
             darkTheme = b[3] as Boolean,
+            dynamicColorEnabled = b[4] as Boolean,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsUiState())
 
@@ -160,6 +163,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setDarkTheme(value: Boolean) {
         viewModelScope.launch { settingsRepository.setDarkTheme(value) }
+    }
+
+    fun setDynamicColorEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setDynamicColorEnabled(value) }
     }
 
     fun setVmRamMb(value: Int) {
@@ -213,13 +220,7 @@ class SettingsViewModel @Inject constructor(
 
     fun resetVm() {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            activityManager.clearApplicationUserData()
-        } else {
-            // Fallback for extremely old devices (not applicable here but for completeness)
-            val storageFile = File(context.filesDir, "storage.img")
-            if (storageFile.exists()) storageFile.delete()
-        }
+        activityManager.clearApplicationUserData()
     }
 
     /**
