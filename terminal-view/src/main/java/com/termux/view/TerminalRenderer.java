@@ -42,6 +42,11 @@ public final class TerminalRenderer {
     // time was straight-up GC pressure with no benefit since we just mutate it.
     private final RectF mBitmapDestRect = new RectF();
 
+    // Podroid: cache last paint color so repeated runs with the same color skip
+    // the (relatively expensive) setColor() call. Reset at the start of each
+    // render() so cross-frame state doesn't leak after a resize.
+    private int mLastPaintColor = 0;
+
     public TerminalRenderer(int textSize, Typeface typeface) {
         mTextSize = textSize;
         mTypeface = typeface;
@@ -84,6 +89,17 @@ public final class TerminalRenderer {
 
         if (reverseVideo)
             canvas.drawColor(palette[TextStyle.COLOR_INDEX_FOREGROUND], PorterDuff.Mode.SRC);
+
+        // Podroid: reset Paint attribute state at the start of every frame so
+        // a previous frame's bold/underline/italic/strike-thru can't leak into
+        // the first run of this frame (drawTextRun only sets these per-run
+        // when the style demands it). Also reset mLastPaintColor so the
+        // color cache starts fresh after cell-grid resizes.
+        mTextPaint.setFakeBoldText(false);
+        mTextPaint.setUnderlineText(false);
+        mTextPaint.setStrikeThruText(false);
+        mTextPaint.setTextSkewX(0f);
+        mLastPaintColor = 0;
 
         float heightOffset = mFontLineSpacingAndAscent;
         for (int row = topRow; row < endRow; row++) {
@@ -236,12 +252,12 @@ public final class TerminalRenderer {
 
         if (backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
             // Only draw non-default background.
-            mTextPaint.setColor(backColor);
+            if (backColor != mLastPaintColor) { mTextPaint.setColor(backColor); mLastPaintColor = backColor; }
             canvas.drawRect(left, y - mFontLineSpacingAndAscent + mFontAscent, right, y, mTextPaint);
         }
 
         if (cursor != 0) {
-            mTextPaint.setColor(cursor);
+            if (cursor != mLastPaintColor) { mTextPaint.setColor(cursor); mLastPaintColor = cursor; }
             float cursorHeight = mFontLineSpacingAndAscent - mFontAscent;
             if (cursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_UNDERLINE) cursorHeight /= 4.f;
             else if (cursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_BAR) right -= (((right - left) * 3) / 4.f);
@@ -261,11 +277,15 @@ public final class TerminalRenderer {
                 foreColor = 0xFF000000 + (red << 16) + (green << 8) + blue;
             }
 
+            // Podroid: always set all four attributes per run — they MUST be
+            // reset to defaults when the run doesn't ask for them, otherwise
+            // the previous run's bold/underline/italic/strike-thru leaks into
+            // this run's drawTextRun() call.
             mTextPaint.setFakeBoldText(bold);
             mTextPaint.setUnderlineText(underline);
             mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
             mTextPaint.setStrikeThruText(strikeThrough);
-            mTextPaint.setColor(foreColor);
+            if (foreColor != mLastPaintColor) { mTextPaint.setColor(foreColor); mLastPaintColor = foreColor; }
 
             // The text alignment is the default Paint.Align.LEFT.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {

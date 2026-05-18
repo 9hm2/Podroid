@@ -708,7 +708,11 @@ public final class TerminalBuffer {
         mTerminalSixel = null;
     }
 
-    public synchronized boolean sixelReadData(int codePoint, int repeat) {
+    // Podroid: sixel parsing is single-threaded (TerminalEmulator's parse loop
+    // runs on the TerminalSession reader thread), so `synchronized` here only
+    // adds monitor-acquisition cost on the hot path of image-heavy frames
+    // (chafa, sixel-rendered tools). Drop it.
+    public boolean sixelReadData(int codePoint, int repeat) {
         //  If an error occurred during processing (like OOM), then remaining sixel command is
         //  completely read, but is ignored.
         if (mTerminalSixel != null) {
@@ -732,7 +736,8 @@ public final class TerminalBuffer {
         return true;
     }
 
-    public synchronized void sixelSetColor(int color) {
+    // Podroid: single-threaded by the same reasoning as sixelReadData(); drop `synchronized`.
+    public void sixelSetColor(int color) {
         if (mTerminalSixel != null)
             mTerminalSixel.setColor(color);
     }

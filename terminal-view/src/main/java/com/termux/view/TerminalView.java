@@ -33,7 +33,6 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.widget.Scroller;
 
-import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
 import com.termux.terminal.KeyHandler;
@@ -162,6 +161,12 @@ public final class TerminalView extends View {
     private int mMouseScrollStartX = -1, mMouseScrollStartY = -1;
     /** Keep track of the time when a touch event leading to sending mouse scroll events started. */
     private long mMouseStartDownTime = -1;
+
+    /** Podroid: reusable scratch buffer for {@link #getColumnAndRow(MotionEvent, boolean)}.
+     *  Mouse events fire dozens of times per second during drag — allocating a fresh
+     *  int[2] each call was needless GC pressure. Callers read & forward the values
+     *  immediately, so reuse is safe. */
+    private final int[] mTempCoords = new int[2];
 
     final Scroller mScroller;
 
@@ -666,7 +671,11 @@ public final class TerminalView extends View {
         if (relativeToScroll) {
             row += mTopRow;
         }
-        return new int[] { column, row };
+        // Podroid: returns the shared mTempCoords; callers read and forward
+        // the values immediately, so the next call overwriting them is fine.
+        mTempCoords[0] = column;
+        mTempCoords[1] = row;
+        return mTempCoords;
     }
 
     /** Send a single mouse event code to the terminal. */
@@ -1209,20 +1218,8 @@ public final class TerminalView extends View {
 
     @RequiresApi(api = Build.VERSION_CODES.O)
     @Override
-    public String[] getAutofillHints() {
-        return mAutoFillHints;
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.O)
-    @Override
     public AutofillValue getAutofillValue() {
         return AutofillValue.forText("");
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.O)
-    @Override
-    public int getImportantForAutofill() {
-        return mAutoFillImportance;
     }
 
     @RequiresApi(api = Build.VERSION_CODES.O)
@@ -1244,30 +1241,6 @@ public final class TerminalView extends View {
             mClient.logStackTraceWithMessage(LOG_TAG, "Failed to get AutofillManager service", e);
             return null;
         }
-    }
-
-    public boolean isAutoFillEnabled() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false;
-
-        try {
-            AutofillManager autofillManager = getAutoFillManagerService();
-            return autofillManager != null && autofillManager.isEnabled();
-        } catch (Exception e) {
-            mClient.logStackTraceWithMessage(LOG_TAG, "Failed to check if Autofill is enabled", e);
-            return false;
-        }
-    }
-
-    public synchronized void requestAutoFillUsername() {
-        requestAutoFill(
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? new String[]{View.AUTOFILL_HINT_USERNAME} :
-                null);
-    }
-
-    public synchronized void requestAutoFillPassword() {
-        requestAutoFill(
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? new String[]{View.AUTOFILL_HINT_PASSWORD} :
-            null);
     }
 
     public synchronized void requestAutoFill(String[] autoFillHints) {
@@ -1525,12 +1498,6 @@ public final class TerminalView extends View {
             return mTextSelectionCursorController.getSelectedText();
         else
             return null;
-    }
-
-    /** Get the selected text stored before "MORE" button was pressed on the context menu. */
-    @Nullable
-    public String getStoredSelectedText() {
-        return mTextSelectionCursorController != null ? mTextSelectionCursorController.getStoredSelectedText() : null;
     }
 
     /** Unset the selected text stored before "MORE" button was pressed on the context menu. */
