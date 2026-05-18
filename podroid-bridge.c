@@ -140,6 +140,8 @@ static void send_resize(void) {
 static void cleanup(void) {
     if (g_term_fd >= 0) { close(g_term_fd); g_term_fd = -1; }
     if (g_ctrl_fd >= 0) { close(g_ctrl_fd); g_ctrl_fd = -1; }
+    if (g_wake_fd[0] >= 0) { close(g_wake_fd[0]); g_wake_fd[0] = -1; }
+    if (g_wake_fd[1] >= 0) { close(g_wake_fd[1]); g_wake_fd[1] = -1; }
 }
 
 int main(int argc, char *argv[]) {
@@ -157,7 +159,6 @@ int main(int argc, char *argv[]) {
 
     g_term_fd = connect_unix(argv[1], 50, 200000);
     if (g_term_fd < 0) {
-        fprintf(stderr, "podroid-bridge: cannot connect to %s\n", argv[1]);
         return 1;
     }
 
