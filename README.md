@@ -33,7 +33,7 @@ A real Alpine VM, a real Linux kernel, rootless Podman, and an in-app X11 viewer
 - Custom **Linux 7.0.5** kernel: every container option (overlayfs, netfilter, bridge, FUSE, binfmt_misc) compiled `=y`. Build fails if any get demoted.
 - Rootless **Podman, Docker and LXC** pre-installed and pre-wired.
 - In-app **X11 viewer** (Xvnc + PulseAudio) with touch→mouse and audio.
-- No root. No ADB tricks. No userland tarballs.
+- No root, no userland tarballs. The default QEMU path needs no ADB; AVF acceleration on pKVM phones takes one ADB grant on first install.
 
 ## Quick start
 
