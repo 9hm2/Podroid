@@ -4,9 +4,9 @@
  *
  * USB device passthrough into the QEMU guest.
  *
- * An unprivileged Android app cannot reach /dev/bus/usb/* directly, so QEMU's
- * usb-host backend can never open a device node itself. Instead this manager
- * goes through the only channel Android offers: UsbManager hands back an
+ * An unprivileged Android app cannot reach the /dev/bus/usb device nodes
+ * directly, so QEMU's usb-host backend can never open one itself. Instead this
+ * manager goes through the only channel Android offers: UsbManager hands back an
  * already-open file descriptor (UsbDeviceConnection.getFileDescriptor()), and
  * that fd is streamed to QEMU over the QMP control socket as SCM_RIGHTS
  * ancillary data (`add-fd`). QEMU then hot-plugs it with
@@ -142,56 +142,60 @@ class UsbPassthroughManager @Inject constructor(
         }
     }
 
-    private suspend fun attach(device: UsbDevice) = mutex.withLock {
-        if (!started || engine.state.value !is VmState.Running) return
-        if (active.containsKey(device.deviceName)) return
+    private suspend fun attach(device: UsbDevice) {
+        mutex.withLock {
+            if (!started || engine.state.value !is VmState.Running) return
+            if (active.containsKey(device.deviceName)) return
 
-        val qmp = engine.qmpClient
-        if (qmp == null) {
-            Log.w(TAG, "No QMP client — USB passthrough needs the QEMU backend")
-            return
-        }
-        val connection = usbManager.openDevice(device)
-        if (connection == null) {
-            Log.w(TAG, "openDevice() failed for ${device.deviceName}")
-            return
-        }
-
-        // fromFd() dups the descriptor; QEMU receives its own dup via SCM_RIGHTS,
-        // so this local copy is closed right after the add-fd write.
-        val pfd = ParcelFileDescriptor.fromFd(connection.fileDescriptor)
-        try {
-            val fdSetId = qmp.addFd(pfd.fileDescriptor).getOrElse { e ->
-                Log.w(TAG, "add-fd failed for ${device.deviceName}", e)
-                connection.close()
+            val qmp = engine.qmpClient
+            if (qmp == null) {
+                Log.w(TAG, "No QMP client — USB passthrough needs the QEMU backend")
                 return
             }
-            val qemuId = "podroid_usb_${device.deviceId}"
-            val args = JSONObject()
-                .put("driver", "usb-host")
-                .put("id", qemuId)
-                .put("hostdevice", "/dev/fdset/$fdSetId")
-            qmp.deviceAdd(args).onFailure { e ->
-                Log.w(TAG, "device_add usb-host failed for ${device.deviceName}", e)
-                qmp.removeFd(fdSetId)
-                connection.close()
+            val connection = usbManager.openDevice(device)
+            if (connection == null) {
+                Log.w(TAG, "openDevice() failed for ${device.deviceName}")
                 return
             }
-            active[device.deviceName] = Entry(connection, fdSetId, qemuId)
-            Log.i(TAG, "Passed USB device ${device.deviceName} → guest ($qemuId)")
-        } finally {
-            runCatching { pfd.close() }
+
+            // fromFd() dups the descriptor; QEMU receives its own dup via
+            // SCM_RIGHTS, so this local copy is closed right after the add-fd write.
+            val pfd = ParcelFileDescriptor.fromFd(connection.fileDescriptor)
+            try {
+                val fdSetId = qmp.addFd(pfd.fileDescriptor).getOrElse { e ->
+                    Log.w(TAG, "add-fd failed for ${device.deviceName}", e)
+                    connection.close()
+                    return
+                }
+                val qemuId = "podroid_usb_${device.deviceId}"
+                val args = JSONObject()
+                    .put("driver", "usb-host")
+                    .put("id", qemuId)
+                    .put("hostdevice", "/dev/fdset/$fdSetId")
+                qmp.deviceAdd(args).onFailure { e ->
+                    Log.w(TAG, "device_add usb-host failed for ${device.deviceName}", e)
+                    qmp.removeFd(fdSetId)
+                    connection.close()
+                    return
+                }
+                active[device.deviceName] = Entry(connection, fdSetId, qemuId)
+                Log.i(TAG, "Passed USB device ${device.deviceName} -> guest ($qemuId)")
+            } finally {
+                runCatching { pfd.close() }
+            }
         }
     }
 
-    private suspend fun detach(deviceName: String) = mutex.withLock {
-        val entry = active.remove(deviceName) ?: return
-        engine.qmpClient?.let { qmp ->
-            qmp.deviceDel(entry.qemuId)
-            qmp.removeFd(entry.fdSetId)
+    private suspend fun detach(deviceName: String) {
+        mutex.withLock {
+            val entry = active.remove(deviceName) ?: return
+            engine.qmpClient?.let { qmp ->
+                qmp.deviceDel(entry.qemuId)
+                qmp.removeFd(entry.fdSetId)
+            }
+            runCatching { entry.connection.close() }
+            Log.i(TAG, "Released USB device $deviceName from guest")
         }
-        runCatching { entry.connection.close() }
-        Log.i(TAG, "Released USB device $deviceName from guest")
     }
 
     @Suppress("DEPRECATION")
