@@ -597,6 +597,15 @@ class QemuEngine @Inject constructor(
         args += "-netdev"; args += netdevArg
         args += "-device"; args += "virtio-net-pci,netdev=net0,romfile="
 
+        // USB host controller for hot-plugged passthrough devices. Only emitted
+        // when the feature is on — the XHCI model adds emulation overhead that
+        // nothing else needs. UsbPassthroughManager streams Android
+        // UsbDeviceConnection fds onto this bus at runtime via QMP add-fd +
+        // device_add usb-host (needs a libusb-enabled QEMU build).
+        if (config.usbPassthroughEnabled) {
+            args += "-device"; args += "qemu-xhci,id=usbhc0"
+        }
+
         // ── Serial (ttyAMA0) → boot log sink only; kernel msgs + init boot stages ─
         args += "-serial"; args += "unix:$serialSockPath,server,nowait"
 

@@ -169,6 +169,13 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setAvfVerboseLogging(value) }
     }
 
+    val usbPassthroughEnabled: StateFlow<Boolean> = settingsRepository.usbPassthroughEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    fun setUsbPassthroughEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setUsbPassthroughEnabled(value) }
+    }
+
     fun setVmRamMb(value: Int) {
         viewModelScope.launch { settingsRepository.setVmRamMb(value) }
     }

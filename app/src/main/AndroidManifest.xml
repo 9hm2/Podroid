@@ -43,6 +43,15 @@
     <uses-feature android:name="android.hardware.opengles.aep" android:required="false" />
 
     <!--
+        USB host mode — needed to pass external USB devices into the VM. Per-device
+        access is granted at runtime via the system consent dialog; there is no
+        manifest <receiver>/device_filter.xml, the attach broadcast is handled by a
+        receiver registered in code only while the VM runs. required="false" so the
+        APK still installs on devices without USB host support.
+    -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <!--
         Android Virtualization Framework (AVF / pKVM) opt-in. Both permissions
         are signature|*|development and can be granted to a side-loaded APK via
         `adb shell pm grant com.excp.podroid <name>` on pKVM-capable devices
