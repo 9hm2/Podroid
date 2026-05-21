@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ─────────────────────────────────────────────────────────────────────────────
 # Podroid Unified Dockerfile
 # Combines Custom Kernel, Initramfs (Alpine VM) and QEMU (Android ARM64) builds.
