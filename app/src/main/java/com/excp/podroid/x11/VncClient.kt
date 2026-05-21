@@ -88,6 +88,7 @@ object VncClient {
      * No-op for in-range rects.
      */
     private fun requireInBounds(x: Int, y: Int, w: Int, h: Int, stride: Int, size: Int) {
+        if (stride <= 0) throw java.io.IOException("RFB: zero or negative stride $stride")
         val rows = size / stride
         if (x < 0 || y < 0 || w < 0 || h < 0 || x + w > stride || y + h > rows)
             throw java.io.IOException("RFB rect out of bounds: x=$x y=$y w=$w h=$h stride=$stride size=$size")
@@ -181,6 +182,7 @@ object VncClient {
                 ENC_EXTENDED_DESKTOP_SIZE -> {       // -308: w/h are the new fb dims
                     val screens = din.readUnsignedByte(); skipFully(din, 3)
                     skipFully(din, screens * 16)     // we use a single-screen model; dims come from w/h
+                    if (w <= 0 || h <= 0) throw java.io.IOException("RFB ExtendedDesktopSize: degenerate geometry w=$w h=$h")
                     newSize = VncSize(w, h)
                 }
                 ENC_RAW -> {
@@ -213,7 +215,7 @@ object VncClient {
                     zrle.decode(din, x, y, w, h, targetArgb, stride)
                     damage.add(VncRect(x, y, w, h))
                 }
-                else -> error("unsupported encoding $enc")
+                else -> throw java.io.IOException("unsupported encoding $enc")
             }
         }
         return RfbUpdate(newSize, damage)

@@ -12,6 +12,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,11 +57,32 @@ class AudioStreamer(private val host: String = "127.0.0.1") {
     }
 
     private suspend fun runLoop() {
-        var track = buildTrack()
-        track.play()
+        // Nullable so a failed (re)build leaves no reference to a released track.
+        // The write loop only signals "rebuild needed" by nulling this; the actual
+        // (re)build happens at the top of each connection attempt, where a throw
+        // propagates to the outer catch with `track` already null — the loop can
+        // never write to a released AudioTrack, and finally never double-releases.
+        var track: AudioTrack? = null
         try {
             while (coroutineContext.isActive) {
                 try {
+                    // Ensure a live track before this connection's write loop. If a
+                    // prior iteration nulled `track` after releasing it, build a fresh
+                    // one here. Build into a local and only publish to `track` after
+                    // play() succeeds; if build/play throws, release the half-built
+                    // local and propagate with `track` still null, so the reconnect
+                    // path retries cleanly without ever writing to a released track.
+                    val activeTrack = track ?: run {
+                        val fresh = buildTrack()
+                        try {
+                            fresh.play()
+                        } catch (e: Throwable) {
+                            fresh.release()
+                            throw e
+                        }
+                        track = fresh
+                        fresh
+                    }
                     Socket().use { s ->
                         socket = s
                         s.connect(InetSocketAddress(host, X11Constants.AUDIO_PORT), 2000)
@@ -78,20 +100,33 @@ class AudioStreamer(private val host: String = "127.0.0.1") {
                             // Loop on write: AudioTrack may accept fewer than
                             // BUF_BYTES per call. A negative return is an
                             // ERROR_* (e.g. ERROR_DEAD_OBJECT after a route
-                            // change) → rebuild the track and resume.
+                            // change) → release this track, null the field so a
+                            // failed rebuild can't leave a released track in use,
+                            // and bail to the outer loop, which rebuilds cleanly.
+                            // A return of exactly 0 is transient (buffer full);
+                            // back off briefly rather than spinning without advancing.
                             var off = 0
+                            var zeroRetries = 0
                             while (off < BUF_BYTES) {
-                                val n = track.write(buf, off, BUF_BYTES - off)
-                                if (n < 0) {
-                                    Log.v(TAG, "AudioTrack.write error $n; rebuilding")
-                                    track.stop(); track.release()
-                                    track = buildTrack(); track.play()
-                                    break
+                                val n = activeTrack.write(buf, off, BUF_BYTES - off)
+                                when {
+                                    n < 0 -> {
+                                        Log.v(TAG, "AudioTrack.write error $n; rebuilding")
+                                        track = null
+                                        activeTrack.stop(); activeTrack.release()
+                                        throw java.io.IOException("AudioTrack.write error $n")
+                                    }
+                                    n == 0 -> {
+                                        if (++zeroRetries > 8) break  // give up this chunk
+                                        delay(5)
+                                    }
+                                    else -> { off += n; zeroRetries = 0 }
                                 }
-                                off += n
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.v(TAG, "audio reconnect: ${e.message}")
                     socket = null
@@ -100,8 +135,8 @@ class AudioStreamer(private val host: String = "127.0.0.1") {
             }
         } finally {
             socket = null
-            track.stop()
-            track.release()
+            track?.stop()
+            track?.release()
         }
     }
 

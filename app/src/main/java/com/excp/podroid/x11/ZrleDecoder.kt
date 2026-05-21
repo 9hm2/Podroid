@@ -35,6 +35,13 @@ class ZrleDecoder {
 
     private val inflater = Inflater(/*nowrap=*/false)
 
+    companion object {
+        // Maximum pixels in a single ZRLE tile (64x64). Run-length accumulators
+        // are capped at this value to prevent Int overflow from wrapping the sum
+        // to a large negative number that defeats the overrun guard.
+        private const val MAX_TILE_PIXELS = 64 * 64
+    }
+
     // Scratch buffer for compressed input read from the socket.
     private var inputScratch = ByteArray(4096)
     // Decompressed output buffer; re-used across inflate calls within one decode() call.
@@ -43,6 +50,24 @@ class ZrleDecoder {
     // Remaining compressed bytes in the current rect that have not yet been fed to the inflater.
     private var remaining = 0
     private var inputStream: DataInputStream? = null
+
+    /**
+     * Resets decoder state between RFB sessions.
+     *
+     * The zlib stream is continuous within a single RFB session, so the [Inflater]
+     * must NOT be reset between rects. It MUST be reset on reconnect: a new RFB
+     * session starts a fresh zlib stream, and feeding it into a finished or leftover
+     * inflater produces corrupt output or a DataFormatException.
+     *
+     * Call this from the session-level connect path (X11ViewModel.connect()), not
+     * from the per-rect decode path. The call site lives in a WS-2 file; this method
+     * is intentionally unused after this change and will be wired in a follow-up.
+     */
+    fun reset() {
+        inflater.reset()
+        remaining = 0
+        inputStream = null
+    }
 
     /**
      * Decodes one ZRLE-encoded rectangle into [target].
@@ -240,12 +265,18 @@ class ZrleDecoder {
          * Each byte 0xFF contributes 255 and reading continues;
          * the first byte < 0xFF ends the sequence, contributing its value.
          * The actual run count = sum + 1.
+         *
+         * The accumulator is capped at MAX_TILE_PIXELS (4096, the pixel count of
+         * the largest possible 64x64 tile) to prevent Int overflow: without the cap,
+         * enough 0xFF bytes would wrap the sum to a large negative number, defeating
+         * the caller's post-hoc (filled + runLen > total) overrun check.
          */
         fun readRunLength(): Int {
             var total = 0
             while (true) {
                 val b = readByte()
                 total += b
+                if (total > MAX_TILE_PIXELS) throw IOException("ZRLE: run length $total exceeds max tile size")
                 if (b != 0xFF) break
             }
             return total + 1

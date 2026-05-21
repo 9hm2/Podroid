@@ -5,9 +5,12 @@
 package com.excp.podroid.x11
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.DataInputStream
+import java.io.IOException
 import java.util.zip.Deflater
 
 class ZrleDecoderTest {
@@ -120,6 +123,35 @@ class ZrleDecoderTest {
         plain.write(0x04)
         val din = DataInputStream(ByteArrayInputStream(zrleRect(plain.toByteArray())))
         ZrleDecoder().decode(din, 0, 0, 2, 2, IntArray(4), 2)
+    }
+
+    // Fix 3: a run-length whose accumulated sum exceeds the maximum tile size
+    // (4096 pixels for a 64x64 tile) must be rejected inside readRunLength itself,
+    // by the explicit accumulator cap, BEFORE the sum can be used. Without the cap
+    // a sufficiently long 0xFF run overflows Int and wraps the sum negative,
+    // defeating the caller's post-hoc (filled + runLen > total) overrun guard.
+    //
+    // The fixture (17 x 0xFF + 0x00 → run = 4336) is caught on BOTH paths, so the
+    // exception type alone proves nothing: pre-fix the caller's overrun guard fires
+    // ("plain RLE run overruns tile"), post-fix the cap fires ("exceeds max tile
+    // size"). Asserting on the message pins detection to the cap — RED pre-fix
+    // (message mismatch), GREEN post-fix.
+    @Test
+    fun `ZRLE run length exceeding tile size throws from readRunLength cap`() {
+        val plain = java.io.ByteArrayOutputStream()
+        plain.write(128) // plain RLE
+        plain.write(cpixel(0xFFAABBCC.toInt()))
+        // 17 x 0xFF: running sum = 17*255 = 4335, exceeds the 4096-pixel cap.
+        repeat(17) { plain.write(0xFF) }
+        plain.write(0x00)
+        val din = DataInputStream(ByteArrayInputStream(zrleRect(plain.toByteArray())))
+        val ex = assertThrows(IOException::class.java) {
+            ZrleDecoder().decode(din, 0, 0, 64, 64, IntArray(64 * 64), 64)
+        }
+        assertTrue(
+            "expected the readRunLength cap to fire, was: ${ex.message}",
+            ex.message?.contains("exceeds max tile size") == true,
+        )
     }
 
     /** High: a palette-RLE single-pixel index beyond the palette → IOException, not AIOOBE. */

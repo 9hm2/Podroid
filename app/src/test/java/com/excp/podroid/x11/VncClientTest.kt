@@ -157,6 +157,33 @@ class VncClientTest {
         VncClient.handshake(java.io.ByteArrayInputStream(serverBytes), java.io.ByteArrayOutputStream())
     }
 
+    // Fix 1: ExtendedDesktopSize with w=0 must throw IOException, not ArithmeticException.
+    @Test(expected = java.io.IOException::class)
+    fun `ExtendedDesktopSize with width zero throws IOException`() {
+        // FramebufferUpdate: type=0, pad, numRects=1; rect x=0 y=0 w=0 h=600 enc=-308;
+        // body: screens=1 + pad[3]; screen descriptor (16 bytes).
+        val bos = java.io.ByteArrayOutputStream()
+        val d = java.io.DataOutputStream(bos)
+        d.writeByte(0); d.writeByte(0); d.writeShort(1)             // msg, pad, numRects
+        d.writeShort(0); d.writeShort(0); d.writeShort(0); d.writeShort(600); d.writeInt(-308)  // w=0
+        d.writeByte(1); d.writeByte(0); d.writeByte(0); d.writeByte(0)  // screens=1 + pad3
+        d.writeInt(1); d.writeShort(0); d.writeShort(0); d.writeShort(0); d.writeShort(600); d.writeInt(0)
+        val target = IntArray(1280 * 720)
+        VncClient.readFramebufferUpdate(java.io.ByteArrayInputStream(bos.toByteArray()), target, 1280, ZrleDecoder())
+    }
+
+    // Fix 2: An unknown encoding type must throw IOException, not IllegalStateException.
+    @Test(expected = java.io.IOException::class)
+    fun `unsupported encoding throws IOException`() {
+        val bos = java.io.ByteArrayOutputStream()
+        val d = java.io.DataOutputStream(bos)
+        d.writeByte(0); d.writeByte(0); d.writeShort(1)          // msg, pad, numRects
+        d.writeShort(0); d.writeShort(0); d.writeShort(1); d.writeShort(1)  // x=0,y=0,w=1,h=1
+        d.writeInt(0x7FFFFFFF)                                    // unknown encoding
+        val target = IntArray(1280 * 720)
+        VncClient.readFramebufferUpdate(java.io.ByteArrayInputStream(bos.toByteArray()), target, 1280, ZrleDecoder())
+    }
+
     @Test fun `ExtendedDesktopSize rect reports new size and writes no pixels`() {
         // FramebufferUpdate: type=0, pad, numRects=1; rect x=0 y=0 w=800 h=600 enc=-308;
         // body: screens=1 pad[3]; screen{id=1,x=0,y=0,w=800,h=600,flags=0}
