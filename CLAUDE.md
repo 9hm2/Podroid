@@ -77,7 +77,7 @@ The terminal layer uses three QEMU Unix sockets, each with a single role:
 
 **Why not chroot?** A previous version used `chroot /mnt/overlay` to pivot into the persistent layer. That broke `podman exec -it` (issue #17): `setns(MNT)` in `crun exec` resets `fs->root`, and the exec'd process saw raw kernel paths (`/mnt/overlay/proc`) instead of `/proc`. `switch_root` reorganizes the kernel mount tree itself — no chroot indirection — so namespace forks see a clean `/`.
 
-**`build-rootfs/`** — Dockerized build of the Alpine squashfs. `Dockerfile.rootfs` fetches `alpine-minirootfs-3.23.4-aarch64.tar.gz`, runs `build-rootfs.sh` (apk-installs alpine-base + openrc + busybox-openrc + bash + podman + crun + fuse-overlayfs + iptables/ip6tables/nftables + bridge-utils + iproute2 + dropbear, sets root password to `podroid`, copies the OpenRC service files from `build-rootfs/files/etc/`, configures runlevels via direct symlinks since chroot-into-aarch64 doesn't work on x86_64), then `mksquashfs -comp gzip` (the kernel only has `CONFIG_SQUASHFS_ZLIB=y`). Result is ~41 MB at `app/src/main/assets/alpine-rootfs.squashfs`, extracted by `PodroidApplication.kt` to `filesDir` and mounted by QEMU as `/dev/vdb`.
+**`build-rootfs/`** — Dockerized build of the Alpine squashfs. `Dockerfile.rootfs` fetches `alpine-minirootfs-3.23.4-aarch64.tar.gz`, runs `build-rootfs.sh` (apk-installs alpine-base + openrc + busybox-openrc + bash + podman + crun + fuse-overlayfs + iptables/ip6tables/nftables + bridge-utils + iproute2 + dropbear, sets root password to `podroid`, copies the OpenRC service files from `build-rootfs/files/etc/`, configures runlevels via direct symlinks since chroot-into-aarch64 doesn't work on x86_64), then `mksquashfs -comp zstd -Xcompression-level 19` (the kernel ships `CONFIG_SQUASHFS_ZSTD=y`). Result is ~41 MB at `app/src/main/assets/alpine-rootfs.squashfs`, extracted by `PodroidApplication.kt` to `filesDir` and mounted by QEMU as `/dev/vdb`.
 
 **`data/repository/`** — `SettingsRepository` (RAM, CPUs, storage size, theme, SSH toggle) and `PortForwardRepository` (persistent rules) both use Jetpack DataStore. No database.
 
@@ -108,7 +108,7 @@ These are executed directly via `ProcessBuilder` / `TerminalSession`, not loaded
 - RAM, CPU count, and user-editable extras (`-cpu`, `-accel`, RNG, etc.) from `SettingsRepository`
 - **Two** virtio block devices:
   - `/dev/vda` ← `storage.img` (writable ext4, persistent overlay upper, resized on first boot to configured size)
-  - `/dev/vdb` ← `alpine-rootfs.squashfs` (read-only, lz-stripped gzip squashfs, mounted at `/mnt/lower` and used as overlay's lowerdir)
+  - `/dev/vdb` ← `alpine-rootfs.squashfs` (read-only, zstd squashfs, mounted at `/mnt/lower` and used as overlay's lowerdir)
 - SLIRP networking with runtime port forwards via `QmpClient` (`netdev_add`/`netdev_remove` over `qmp.sock`)
 
 All socket and image paths are under `context.filesDir`.

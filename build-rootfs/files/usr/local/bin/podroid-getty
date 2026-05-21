@@ -4,8 +4,10 @@
 # script picks the right one at boot via the kernel cmdline marker:
 #
 #   podroid.tty=hvc0   QEMU/TCG backend (virtio-console)
-#   podroid.tty=ttyS0  AVF/pKVM backend (PL011 serial, the only AVF console
-#                      with an input side on Pixel's crosvm)
+#   podroid.tty=hvc0   AVF/pKVM backend: AvfEngine boots with console=hvc0
+#                      and emits podroid.tty=hvc0; crosvm's virtio-console is
+#                      the AVF console with an input side. (The ttyS0 inittab
+#                      line just parks via the wrong-tty sleep below.)
 #
 # If the marker is absent, default to hvc0 — that's QEMU's historical setup
 # so legacy boots without the marker still get a login.
