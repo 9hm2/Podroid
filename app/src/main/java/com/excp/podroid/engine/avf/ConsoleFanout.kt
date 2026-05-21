@@ -97,8 +97,14 @@ class ConsoleFanout(
                 while (true) {
                     val n = consoleOutput.read(buf)
                     if (n <= 0) break
-                    detector.feed(buf, n)
+                    // Tee to capture BEFORE feeding the detector. detector.feed
+                    // flips _state Starting→Running on "Ready!", and onVmBytes
+                    // only persists while Starting; feeding first would drop the
+                    // very chunk carrying "Ready!" (and any late-boot error
+                    // batched with it) from console.log. Order guarantees capture
+                    // is never LESS than before — it now includes the Ready chunk.
                     onVmBytes?.invoke(buf, n)
+                    detector.feed(buf, n)
                     val client = clientFd ?: continue   // no bridge attached → keep capturing
                     var off = 0
                     while (off < n) {

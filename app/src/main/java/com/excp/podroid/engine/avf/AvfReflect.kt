@@ -47,7 +47,15 @@ object AvfReflect {
      * delete + recreate on that path.
      */
     fun setConfig(vm: Any, cfg: Any) {
-        val m = vm.javaClass.getDeclaredMethod("setConfig", CFG).apply { isAccessible = true }
+        // getDeclaredMethod only finds a method declared on the exact runtime
+        // class; on OS builds where setConfig is inherited from a supertype it
+        // throws NoSuchMethodException, which the caller misreads as "config
+        // rejected" and forces a needless delete+recreate every start. Fall back
+        // to getMethod (searches supertypes) before concluding it's absent. A
+        // genuine absence still throws — the caller's delete+recreate handles it.
+        val m = (runCatching { vm.javaClass.getDeclaredMethod("setConfig", CFG) }
+            .getOrNull() ?: vm.javaClass.getMethod("setConfig", CFG))
+            .apply { isAccessible = true }
         m.invoke(vm, cfg)
     }
 

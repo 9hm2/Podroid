@@ -26,6 +26,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.sync.Semaphore
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -48,6 +49,11 @@ class VsockPortForwarder(
         // Mirror the control channel's retry, but briefly (per-connection).
         private const val CONNECT_ATTEMPTS = 6
         private const val CONNECT_RETRY_MS = 250L
+        // Hard ceiling on simultaneous in-flight proxy connections. A burst
+        // against 0.0.0.0:hostPort while the guest agent isn't up would otherwise
+        // launch one coroutine per inbound TCP connection, each holding a socket
+        // for up to ~1.5s of connect retries — an unbounded fd/coroutine spike.
+        private const val MAX_INFLIGHT = 64
     }
 
     private var server: ServerSocket? = null
@@ -59,6 +65,11 @@ class VsockPortForwarder(
     // Live client sockets — force-closed in close() so a pump blocked in a
     // native read() unblocks (cancel() alone can't interrupt a blocking read).
     private val openSockets = java.util.Collections.synchronizedSet(mutableSetOf<Socket>())
+    // Caps concurrent in-flight proxy() coroutines so an accept burst can't
+    // exhaust fds/coroutines. tryAcquire (non-suspending) keeps the accept loop
+    // hot: when the cap is hit we drop the new connection immediately rather than
+    // parking coroutines that would each pin a socket while waiting for a permit.
+    private val inflight = Semaphore(MAX_INFLIGHT)
     @Volatile private var closed = false
 
     fun start() {
@@ -68,8 +79,15 @@ class VsockPortForwarder(
         acceptJob = scope.launch(Dispatchers.IO) {
             while (!closed) {
                 val client = try { s.accept() } catch (_: SocketException) { break }
+                if (!inflight.tryAcquire()) {
+                    Log.w(TAG, "inflight cap ($MAX_INFLIGHT) reached on :$hostPort; dropping connection")
+                    runCatching { client.close() }
+                    continue
+                }
                 openSockets.add(client)
-                scope.launch(Dispatchers.IO + connections) { proxy(client) }
+                scope.launch(Dispatchers.IO + connections) {
+                    try { proxy(client) } finally { inflight.release() }
+                }
             }
         }
     }

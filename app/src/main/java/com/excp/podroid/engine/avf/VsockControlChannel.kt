@@ -76,12 +76,16 @@ class VsockControlChannel(
                         if (closed) { runCatching { p.close() }; return@launch }
                         pfd = p
                         writer = w
-                        // Drain anything queued before we got connected.
-                        for (line in pending) {
-                            runCatching { w.println(line) }
-                                .onFailure { Log.w(TAG, "drain send failed: $line", it) }
-                        }
+                        // Drain anything queued before we got connected. writeLine
+                        // checks checkError() after each println; a mid-drain dead
+                        // connection tears down + re-arms (and stops the drain) so we
+                        // don't spin writing into a broken pipe. Snapshot first so the
+                        // re-arm path can't mutate `pending` while we iterate it.
+                        val toDrain = pending.toList()
                         pending.clear()
+                        for (line in toDrain) {
+                            if (!writeLine(w, line)) break
+                        }
                     }
                     Log.d(TAG, "control channel connected after ${attempt + 1} attempts")
                     true
@@ -100,11 +104,50 @@ class VsockControlChannel(
         }
     }
 
+    /**
+     * Write one line and check for a silently-swallowed I/O error. PrintWriter
+     * never throws on a dead socket — it only flips an internal flag exposed via
+     * checkError(). Without this poll a dropped guest agent meant every
+     * RESIZE/ADD/REMOVE was lost forever with no signal and no reconnect. On
+     * error we tear down the writer/pfd and re-arm the connect loop so a later
+     * command reconnects. Returns true if the write looks healthy.
+     *
+     * Caller must hold the instance monitor (both call sites are @Synchronized
+     * or run inside `synchronized(this)`).
+     */
+    private fun writeLine(w: PrintWriter, line: String): Boolean {
+        w.println(line)
+        if (!w.checkError()) return true
+        Log.w(TAG, "control channel write error on '$line'; tearing down + reconnecting")
+        reconnect()
+        return false
+    }
+
+    /**
+     * Tear down a dead connection and re-arm the retry loop so the next command
+     * reconnects. Idempotent against close(): a closed channel never reconnects.
+     * The in-flight line that triggered this is dropped (RESIZE self-heals on the
+     * next geometry change; ADD/REMOVE are re-dispatched by the engine layer).
+     * Caller must hold the instance monitor.
+     */
+    private fun reconnect() {
+        if (closed) return
+        runCatching { writer?.close() }
+        runCatching { pfd?.close() }
+        writer = null
+        pfd = null
+        // Clear gaveUp so the fresh open() actually retries instead of immediately
+        // dropping; cancel any prior connect coroutine before launching a new one.
+        gaveUp = false
+        warnedUnavailable = false
+        runCatching { connectJob?.cancel() }
+        open()
+    }
+
     @Synchronized private fun sendOrQueue(line: String) {
         val w = writer
         when {
-            w != null -> runCatching { w.println(line) }
-                .onFailure { Log.w(TAG, "send failed: $line", it) }
+            w != null -> writeLine(w, line)
             closed || gaveUp -> {
                 // Channel will never connect (gave up) or is shutting down:
                 // drop with a single warning instead of growing `pending`.

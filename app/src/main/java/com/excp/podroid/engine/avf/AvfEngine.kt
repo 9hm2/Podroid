@@ -72,6 +72,13 @@ class AvfEngine @Inject constructor(
     override var terminalSession: TerminalSession? = null
         private set
 
+    // Wall-clock millis of the most recent →Running transition (both the
+    // detector onReady path and the boot-timeout fallback set it), null until
+    // running and after cleanup(). Drives the Home uptime readout. @Volatile:
+    // set on the detector/timeout thread, read by the UI ticker on another.
+    @Volatile private var _runningSinceMs: Long? = null
+    override val runningSinceMs: Long? get() = _runningSinceMs
+
     override val backendId: String = "avf"
 
     /** AVF has no QMP socket; port forwarding is deferred to a future milestone. */
@@ -102,7 +109,11 @@ class AvfEngine @Inject constructor(
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var vmHandle: Any? = null
+    // @Volatile: written on the start()/cleanup() thread, read from stop() and
+    // addPortForward() on other threads. Every other shared lifecycle field here
+    // (control, stopRequested, vmGeneration) is already @Volatile for the same
+    // cross-thread visibility reason; vmHandle was the lone unsynchronized gap.
+    @Volatile private var vmHandle: Any? = null
     /**
      * Monotonic per-start token. Captured in each VM's callback closures so a
      * late callback from a PREVIOUS VM (callbacks run on ForkJoinPool, so a fast
@@ -156,6 +167,8 @@ class AvfEngine @Inject constructor(
     val ctrlSockPath: String get() = "${context.filesDir.absolutePath}/avf-ctrl.sock"
 
     private val detector = BootStageDetector(_bootStage, _state) {
+        // Detector already flipped _state to Running; stamp the uptime origin.
+        _runningSinceMs = System.currentTimeMillis()
         Log.i(TAG, "boot Ready! detected — bridge connects via ConsoleFanout")
         // Wipe the boot log from the emulator so the user sees a clean login
         // prompt. AVF only exposes one captured console stream, so unlike
@@ -364,6 +377,7 @@ class AvfEngine @Inject constructor(
                     _state.value is VmState.Starting) {
                     Log.w(TAG, "AVF boot timeout — forcing Running state")
                     _bootStage.value = "Ready"
+                    _runningSinceMs = System.currentTimeMillis()
                     _state.value = VmState.Running
                     bringUpControlChannel()
                 }
@@ -577,6 +591,7 @@ class AvfEngine @Inject constructor(
 
     private fun cleanup() {
         if (cleanedUp.getAndSet(true)) return
+        _runningSinceMs = null
         bootTimeoutJob?.cancel()
         bootTimeoutJob = null
         // Tear down forwarders + control before draining the fanout so the
