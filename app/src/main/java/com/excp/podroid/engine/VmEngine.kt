@@ -83,4 +83,5 @@ data class VmConfig(
     val kernelExtraCmdline: String = "",
     val verboseLogging: Boolean = false,
     val x11Dpi: Int = 96,
+    val usbPassthroughEnabled: Boolean = false,
 )

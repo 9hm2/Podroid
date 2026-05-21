@@ -253,6 +253,15 @@ RUN wget -q https://download.savannah.gnu.org/releases/attr/attr-2.5.2.tar.gz &&
 RUN git clone --depth=1 https://github.com/kaniini/libucontext.git /tmp/libucontext && make -C /tmp/libucontext ARCH=aarch64 CC="${CC}" EXPORT_UNPREFIXED=yes && install -Dm644 /tmp/libucontext/libucontext.a ${PREFIX}/lib/libucontext.a && install -Dm644 /tmp/libucontext/include/libucontext/libucontext.h ${PREFIX}/include/libucontext/libucontext.h && install -Dm644 /tmp/libucontext/arch/common/include/libucontext/bits.h ${PREFIX}/include/libucontext/bits.h \
     && printf '#ifndef PODROID_UCONTEXT_SHIM_H\n#define PODROID_UCONTEXT_SHIM_H\n#include_next <ucontext.h>\n#include <libucontext/libucontext.h>\n#define getcontext libucontext_getcontext\n#define makecontext libucontext_makecontext\n#define setcontext libucontext_setcontext\n#define swapcontext libucontext_swapcontext\n#endif\n' > ${PREFIX}/include/ucontext.h
 
+# libusb — required for QEMU's usb-host device. USB passthrough on Android can
+# never open /dev/bus/usb itself, so QEMU receives an already-open fd over QMP
+# and hands it to libusb_wrap_sys_device(); --disable-udev because Android has
+# no udev and we never enumerate (every device arrives as a passed-in fd).
+RUN wget -q https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2 \
+    && tar xf libusb-1.0.27.tar.bz2 && cd libusb-1.0.27 \
+    && ./configure --host=aarch64-linux-android --prefix=${PREFIX} --enable-static --disable-shared --disable-udev CC="${CC}" \
+    && make -j$(nproc) install
+
 # QEMU Build (committed flags — no LTO, no -O3 — plus minimal Android compat patches)
 RUN wget -q https://download.qemu.org/${QEMU_DIR}.tar.xz && tar xf ${QEMU_DIR}.tar.xz
 RUN sed -i "s/rt = cc.find_library('rt', required: true)/rt = cc.find_library('rt', required: false)/" ${QEMU_DIR}/meson.build
@@ -287,7 +296,7 @@ RUN sed -i '1i#include "/opt/qemu_jmp.h"' ${QEMU_DIR}/util/coroutine-ucontext.c 
     && sed -i 's/\bsigsetjmp(\([^,]*\), *0)/_qemu_setjmp(\1)/g' ${QEMU_DIR}/util/coroutine-ucontext.c \
     && sed -i 's/\bsiglongjmp(/_qemu_longjmp(/g' ${QEMU_DIR}/util/coroutine-ucontext.c
 
-RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-" --extra-cflags="-fPIC -DANDROID -include /opt/shm_shim.h -I${PREFIX}/include -I${PREFIX}/include/glib-2.0 -I${PREFIX}/lib/glib-2.0/include" --extra-ldflags="-L${PREFIX}/lib -Wl,-z,max-page-size=16384 ${PREFIX}/lib/libucontext.a ${PREFIX}/lib/libshm.a ${PREFIX}/lib/libqemujmp.a" --prefix=/opt/qemu-out --target-list=aarch64-softmmu --enable-tcg --enable-slirp --enable-virtfs --enable-pie --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-vhost-user --disable-plugins --with-coroutine=ucontext && make -j$(nproc) install
+RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-" --extra-cflags="-fPIC -DANDROID -include /opt/shm_shim.h -I${PREFIX}/include -I${PREFIX}/include/glib-2.0 -I${PREFIX}/lib/glib-2.0/include" --extra-ldflags="-L${PREFIX}/lib -Wl,-z,max-page-size=16384 ${PREFIX}/lib/libucontext.a ${PREFIX}/lib/libshm.a ${PREFIX}/lib/libqemujmp.a" --prefix=/opt/qemu-out --target-list=aarch64-softmmu --enable-tcg --enable-slirp --enable-virtfs --enable-libusb --enable-pie --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-vhost-user --disable-plugins --with-coroutine=ucontext && make -j$(nproc) install
 
 # Bridge
 COPY podroid-bridge.c /tmp/podroid-bridge.c

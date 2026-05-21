@@ -52,6 +52,7 @@ class SettingsRepository @Inject constructor(
         val KEY_ENGINE_SELECTION       = stringPreferencesKey("engine_selection")
         val KEY_AVF_HINT_DISMISSED      = booleanPreferencesKey("avf_hint_dismissed")
         val KEY_AVF_VERBOSE_LOGGING     = booleanPreferencesKey("avf_verbose_logging")
+        val KEY_USB_PASSTHROUGH_ENABLED = booleanPreferencesKey("usb_passthrough_enabled")
 
         val KEY_X11_RES_MODE        = stringPreferencesKey("x11_resolution_mode")
         val KEY_X11_RES_PRESET      = stringPreferencesKey("x11_resolution_preset")
@@ -124,6 +125,7 @@ class SettingsRepository @Inject constructor(
     val dynamicColorEnabled  = pref(KEY_DYNAMIC_COLOR_ENABLED, false)
     val lastBootDurationMs   = pref(KEY_LAST_BOOT_DURATION_MS, 0L)
     val avfHintDismissed     = pref(KEY_AVF_HINT_DISMISSED, false)
+    val usbPassthroughEnabled = pref(KEY_USB_PASSTHROUGH_ENABLED, false)
     val avfVerboseLogging: Flow<Boolean> = context.dataStore.data
         .catch { e -> if (e is IOException) emit(androidx.datastore.preferences.core.emptyPreferences()) else throw e }
         .map { prefs -> prefs[KEY_AVF_VERBOSE_LOGGING] ?: false }
@@ -153,6 +155,7 @@ class SettingsRepository @Inject constructor(
     suspend fun setEngineSelection(value: EngineSelection) = set(KEY_ENGINE_SELECTION, value.name)
     suspend fun setAvfHintDismissed(value: Boolean)      = set(KEY_AVF_HINT_DISMISSED, value)
     suspend fun setAvfVerboseLogging(value: Boolean)     = set(KEY_AVF_VERBOSE_LOGGING, value)
+    suspend fun setUsbPassthroughEnabled(value: Boolean) = set(KEY_USB_PASSTHROUGH_ENABLED, value)
 
     val x11Settings: kotlinx.coroutines.flow.Flow<com.excp.podroid.x11.X11Settings> = context.dataStore.data
         .catch { e -> if (e is IOException) emit(androidx.datastore.preferences.core.emptyPreferences()) else throw e }
@@ -199,4 +202,5 @@ class SettingsRepository @Inject constructor(
     suspend fun getKernelExtraCmdlineSnapshot()   = kernelExtraCmdline.first()
     suspend fun getEngineSelectionSnapshot()      = engineSelection.first()
     suspend fun getAvfVerboseLoggingSnapshot()    = avfVerboseLogging.first()
+    suspend fun getUsbPassthroughEnabledSnapshot() = usbPassthroughEnabled.first()
 }

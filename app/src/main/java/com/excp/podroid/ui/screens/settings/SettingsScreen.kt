@@ -294,6 +294,31 @@ fun SettingsScreen(
                         onKernelReset = viewModel::resetKernelExtraCmdline,
                         enabled = vmNotRunning,
                     )
+
+                    PodroidSectionLabel("USB passthrough")
+                    val usbPassthrough by viewModel.usbPassthroughEnabled.collectAsStateWithLifecycle()
+                    PodroidListRow(
+                        label = "USB device passthrough",
+                        rightSlot = {
+                            PodroidSwitch(
+                                checked = usbPassthrough,
+                                onCheckedChange = { viewModel.setUsbPassthroughEnabled(it) },
+                                enabled = vmNotRunning,
+                            )
+                        },
+                    )
+                    Text(
+                        text = "Hot-plugs external USB devices into the running VM. Each device " +
+                            "asks for permission when attached. Adds a USB controller at boot — " +
+                            "restart the VM to apply. Requires a libusb-enabled QEMU build.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(
+                            start = PodroidTokens.Spacing.MD,
+                            end = PodroidTokens.Spacing.MD,
+                            bottom = PodroidTokens.Spacing.SM,
+                        ),
+                    )
                 }
 
                 // ── ABOUT ─────────────────────────────────────────────

@@ -33,6 +33,7 @@ import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.VmConfig
 import com.excp.podroid.engine.VmEngine
 import com.excp.podroid.engine.VmState
+import com.excp.podroid.engine.usb.UsbPassthroughManager
 import com.excp.podroid.util.NetworkUtils
 import com.excp.podroid.x11.X11Constants
 import dagger.hilt.android.AndroidEntryPoint
@@ -46,6 +47,7 @@ class PodroidService : Service() {
     @Inject lateinit var engine: VmEngine
     @Inject lateinit var portForwardRepository: PortForwardRepository
     @Inject lateinit var settingsRepository: SettingsRepository
+    @Inject lateinit var usbPassthroughManager: UsbPassthroughManager
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var notificationJob: Job? = null
@@ -128,6 +130,7 @@ class PodroidService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         notificationJob?.cancel()
+        usbPassthroughManager.stop()
         releaseWakeLock()
         serviceScope.cancel()
     }
@@ -244,6 +247,22 @@ class PodroidService : Service() {
         }
     }
 
+    /**
+     * Arms USB passthrough once the VM is Running and tears it down when the VM
+     * reaches a terminal state. Only launched when the feature is enabled, so
+     * the BroadcastReceiver is live strictly while a VM session is up.
+     */
+    private suspend fun observeStateForUsb() {
+        engine.state.collect { state ->
+            when (state) {
+                is VmState.Running -> usbPassthroughManager.start()
+                is VmState.Stopped, is VmState.Idle, is VmState.Error ->
+                    usbPassthroughManager.stop()
+                else -> {}
+            }
+        }
+    }
+
     private fun launchPodroid() {
         serviceScope.launch {
             startNotificationUpdates()
@@ -283,7 +302,11 @@ class PodroidService : Service() {
                         kernelExtraCmdline = settingsRepository.getKernelExtraCmdlineSnapshot(),
                         verboseLogging = settingsRepository.getAvfVerboseLoggingSnapshot(),
                         x11Dpi = settingsRepository.getX11DpiSnapshot(),
+                        usbPassthroughEnabled = settingsRepository.getUsbPassthroughEnabledSnapshot(),
                     )
+                    if (config.usbPassthroughEnabled) {
+                        serviceScope.launch { observeStateForUsb() }
+                    }
                     engine.start(rules, config)
                 } catch (e: Exception) {
                     Log.e(TAG, "QEMU failed to start", e)
