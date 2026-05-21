@@ -112,6 +112,25 @@ static void listener_remove(int idx) {
     listener_count--;
 }
 
+/*
+ * Lazy liveness check for a tracked listener pid. reap_children() must stay
+ * async-signal-safe, so it can't prune listeners[] from the SIGCHLD handler;
+ * instead the main-loop functions validate a row before trusting it. A dead
+ * listener (post-fork bind/listen failure → _exit, or external kill) leaves a
+ * stale {vport,pid} row whose pid the kernel may have recycled for an
+ * unrelated process group — kill(-pid) on it would signal the wrong group, and
+ * a re-ADD would no-op on the stale row. kill(pid,0) probes existence without
+ * sending a signal; ESRCH means the pid is gone (or never ours after recycle).
+ *
+ * Residual TOCTOU: the pid could in theory be reaped and recycled between this
+ * check and a subsequent kill(). But our own children are only reaped here in
+ * the single-threaded main loop after this returns alive, so within one
+ * handler the result holds; this is vastly safer than blindly trusting a row
+ * that has been stale across many event-loop iterations. */
+static int pid_alive(pid_t pid) {
+    return kill(pid, 0) == 0 || errno != ESRCH;
+}
+
 /* ── Splice loop (TCP listener child) ───────────────────────────────────── */
 
 /*
@@ -130,21 +149,42 @@ static void close_inherited_fds(int keep) {
     }
 }
 
-static ssize_t write_all(int fd, const void *buf, size_t n) {
-    const char *p = (const char *)buf;
-    size_t left = n;
-    while (left > 0) {
-        ssize_t w = write(fd, p, left);
-        if (w < 0) { if (errno == EINTR) continue; return -1; }
-        if (w == 0) return -1;
-        p += w; left -= w;
-    }
-    return (ssize_t)n;
+static int set_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-static void splice_loop(int a, int b) {
+/*
+ * One relay direction: bytes flow src → dst through a single in-flight buffer.
+ * `len` is bytes buffered, `off` how many already written; src_eof latches when
+ * src returns 0/error. The destination's write side is half-closed (SHUT_WR)
+ * exactly once, after src_eof AND the buffer has fully drained, so the peer
+ * sees EOF without losing the last bytes.
+ */
+struct relay_dir {
+    int src, dst;
     char buf[16384];
-    fd_set rfds;
+    size_t len, off;
+    int src_eof;
+    int wr_shut;
+};
+
+/*
+ * Full-duplex byte relay between two sockets. Unlike the bridge (which forwards
+ * an interactive PTY whose consumer drains continuously, so a one-direction
+ * blocking write is fine), this agent forwards arbitrary TCP — including bulk
+ * transfers in BOTH directions over one connection (e.g. SCP reading and
+ * writing at once). A read-only select() plus a shared-buffer blocking write
+ * would deadlock there: both peers' send buffers fill, both blocking writes
+ * stall, and neither side ever drains. So both fds go non-blocking, each
+ * direction keeps its own pending buffer, and we select() for writability
+ * before writing and for readability only when that direction's buffer is
+ * empty. A stalled write in one direction can no longer starve reads in the
+ * other. The SHUT_WR-on-EOF half-close is preserved per direction.
+ */
+static void splice_loop(int a, int b) {
+    fd_set rfds, wfds;
     /* select() can't represent fds >= FD_SETSIZE without scribbling past the
      * bitmap. FD_CLOEXEC on every socket keeps fd numbers low, but bail safely
      * rather than corrupt the stack if the table ever climbs that high. */
@@ -153,34 +193,69 @@ static void splice_loop(int a, int b) {
         close(b);
         return;
     }
+    /* Non-blocking is what makes select-on-write meaningful: a write that would
+     * block returns EAGAIN instead of stalling the whole relay. */
+    set_nonblock(a);
+    set_nonblock(b);
     int maxfd = (a > b ? a : b) + 1;
-    int a_eof = 0, b_eof = 0;
-    while (!a_eof || !b_eof) {
+
+    struct relay_dir ab = { .src = a, .dst = b, .len = 0, .off = 0, .src_eof = 0, .wr_shut = 0 };
+    struct relay_dir ba = { .src = b, .dst = a, .len = 0, .off = 0, .src_eof = 0, .wr_shut = 0 };
+    struct relay_dir *dirs[2] = { &ab, &ba };
+
+    for (;;) {
         FD_ZERO(&rfds);
-        if (!a_eof) FD_SET(a, &rfds);
-        if (!b_eof) FD_SET(b, &rfds);
-        if (select(maxfd, &rfds, NULL, NULL, NULL) < 0) {
+        FD_ZERO(&wfds);
+        int active = 0;
+        for (int i = 0; i < 2; i++) {
+            struct relay_dir *d = dirs[i];
+            /* Read more only when the buffer is empty and the source is open. */
+            if (!d->src_eof && d->len == d->off) { FD_SET(d->src, &rfds); active = 1; }
+            /* Write only when there are buffered bytes pending. */
+            if (d->len > d->off) { FD_SET(d->dst, &wfds); active = 1; }
+        }
+        if (!active) break;  /* both directions drained and EOF'd */
+
+        if (select(maxfd, &rfds, &wfds, NULL, NULL) < 0) {
             if (errno == EINTR) continue;
             break;
         }
-        if (!a_eof && FD_ISSET(a, &rfds)) {
-            ssize_t n = read(a, buf, sizeof(buf));
-            if (n <= 0) {
-                a_eof = 1;
-                /* a→b is done: half-close b's write side so the peer sees
-                 * EOF, then keep draining b→a until b also EOFs. */
-                shutdown(b, SHUT_WR);
+
+        int fatal = 0;
+        for (int i = 0; i < 2 && !fatal; i++) {
+            struct relay_dir *d = dirs[i];
+            /* Flush pending bytes first so the buffer frees up for the next read. */
+            if (d->len > d->off && FD_ISSET(d->dst, &wfds)) {
+                ssize_t w = write(d->dst, d->buf + d->off, d->len - d->off);
+                if (w < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { fatal = 1; break; }
+                } else if (w == 0) {
+                    fatal = 1; break;
+                } else {
+                    d->off += (size_t)w;
+                    if (d->off == d->len) d->len = d->off = 0;
+                }
             }
-            else if (write_all(b, buf, (size_t)n) < 0) break;
-        }
-        if (!b_eof && FD_ISSET(b, &rfds)) {
-            ssize_t n = read(b, buf, sizeof(buf));
-            if (n <= 0) {
-                b_eof = 1;
-                shutdown(a, SHUT_WR);
+            /* Refill the buffer from the source when it's empty. */
+            if (!d->src_eof && d->len == d->off && FD_ISSET(d->src, &rfds)) {
+                ssize_t n = read(d->src, d->buf, sizeof(d->buf));
+                if (n > 0) {
+                    d->len = (size_t)n;
+                    d->off = 0;
+                } else if (n == 0) {
+                    d->src_eof = 1;
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    d->src_eof = 1;  /* treat a hard read error as EOF for this side */
+                }
             }
-            else if (write_all(a, buf, (size_t)n) < 0) break;
+            /* Once the source is done and its buffer is drained, half-close the
+             * destination's write side so the peer sees EOF (done once). */
+            if (d->src_eof && d->len == d->off && !d->wr_shut) {
+                shutdown(d->dst, SHUT_WR);
+                d->wr_shut = 1;
+            }
         }
+        if (fatal) break;
     }
     close(a);
     close(b);
@@ -234,6 +309,14 @@ static void tcp_listener_main(int vport, const char *host, int gport) {
         LOG_E("vsock listen(%d) failed: %s", vport, strerror(errno));
         _exit(1);
     }
+    /* Drop fds inherited from the parent that this listener has no use for: the
+     * ctl listening socket, and (when forked from a live handle_add) the ctl
+     * connection fd plus its dup in ctl_loop, as well as sibling forwarders'
+     * listening sockets. They're CLOEXEC but this process never exec's, so
+     * without an explicit close they stay pinned for the listener's whole life
+     * — keeping a removed ctl/forward fd alive. Our own `s` is the only socket
+     * to keep; splice children re-run close_inherited_fds(c) for their fd. */
+    close_inherited_fds(s);
     LOG_I("tcp listener: vsock:%d → %s:%d", vport, host, gport);
 
     for (;;) {
@@ -263,9 +346,21 @@ static void tcp_listener_main(int vport, const char *host, int gport) {
 
 /* ── Config parsing & live edits ────────────────────────────────────────── */
 
-/* Spawn a TCP listener child and remember its PID. Idempotent on vport. */
+/*
+ * Spawn a TCP listener child and remember its PID. Idempotent on vport.
+ * Returns 1 when a NEW listener was spawned, 0 when one was already running,
+ * -1 on failure. The caller uses the 1/0 split to append forwards.conf only on
+ * a genuine new spawn (a re-ADD of a live vport must not duplicate the line).
+ *
+ * A row found for this vport whose pid is dead (the listener _exit'd on a
+ * post-fork bind/listen failure, or was killed externally) is pruned here so a
+ * re-ADD spawns a fresh listener instead of no-op'ing on the stale row. */
 static int spawn_tcp_listener(int vport, const char *host, int gport) {
-    if (listener_find(vport) >= 0) return 0;  // already running
+    int idx = listener_find(vport);
+    if (idx >= 0) {
+        if (pid_alive(listeners[idx].pid)) return 0;  // already running
+        listener_remove(idx);  // stale row for a dead listener — drop and respawn
+    }
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) tcp_listener_main(vport, host, gport);  // never returns
@@ -276,7 +371,7 @@ static int spawn_tcp_listener(int vport, const char *host, int gport) {
         if (kill(-pid, SIGTERM) < 0 && errno == ESRCH) kill(pid, SIGTERM);
         return -1;
     }
-    return 0;
+    return 1;
 }
 
 /* Append a TCP rule to the config file. Best-effort — failure is logged but
@@ -329,18 +424,38 @@ static void handle_resize(int rows, int cols) {
 }
 
 static void handle_add(int vport, const char *host, int gport) {
-    if (spawn_tcp_listener(vport, host, gport) == 0) {
-        append_config_tcp(vport, host, gport);
-        LOG_I("ADD vsock:%d → %s:%d", vport, host, gport);
-    } else {
+    int r = spawn_tcp_listener(vport, host, gport);
+    if (r < 0) {
         LOG_W("ADD vsock:%d failed", vport);
+        return;
     }
+    /* Touch forwards.conf only on a genuine new spawn (r == 1). A repeated ADD
+     * of an already-running vport (r == 0) must not grow the file without
+     * bound. Drop any existing line for this vport first, then append once:
+     * when a re-ADD respawns after the old listener died on its own (no REMOVE
+     * ran, so its line lingers), this rewrites rather than duplicates — and it
+     * self-heals any stale duplicate already on disk. */
+    if (r == 1) {
+        remove_config_line(vport);
+        append_config_tcp(vport, host, gport);
+    }
+    LOG_I("ADD vsock:%d → %s:%d", vport, host, gport);
 }
 
 static void handle_remove(int vport) {
     int idx = listener_find(vport);
     if (idx < 0) { LOG_W("REMOVE vsock:%d — no such listener", vport); return; }
     pid_t pid = listeners[idx].pid;
+    /* If the listener already died on its own, the kernel may have recycled its
+     * pid for an unrelated process group — kill(-pid) would signal the wrong
+     * processes. Probe with kill(pid,0) first and, if gone, just prune the
+     * stale row and drop the config line; never signal a recycled pid. */
+    if (!pid_alive(pid)) {
+        listener_remove(idx);
+        remove_config_line(vport);
+        LOG_I("REMOVE vsock:%d — listener (pid %d) already gone, pruned", vport, (int)pid);
+        return;
+    }
     /* Kill the whole process group (listener + its in-flight splice children,
      * which share pgid == listener pid) so existing connections stop too, not
      * just the acceptor. Fall back to the bare pid if the group is somehow

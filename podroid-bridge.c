@@ -46,6 +46,16 @@
  * and shorter than ~80 ms risks firing mid-animation. */
 #define RESIZE_DEBOUNCE_MS 80
 
+/* Fallback select() timeout used ONLY when the self-pipe couldn't be created
+ * (socketpair() failed). Without a wake fd the handlers can't nudge select(),
+ * and Bionic installs handlers with SA_RESTART, so a blocked select() with a
+ * NULL timeout silently auto-restarts on SIGTERM instead of returning — the
+ * loop would never see g_shutdown and shutdown/resize would wedge. Re-checking
+ * the signal flags every 50 ms (the bridge's pre-self-pipe poll interval)
+ * keeps shutdown and resize responsive. The self-pipe fast path keeps a NULL
+ * (block-forever) timeout, so this costs nothing on the normal path. */
+#define WAKE_FALLBACK_POLL_MS 50
+
 static volatile sig_atomic_t g_winch    = 0;
 static volatile sig_atomic_t g_shutdown = 0;
 static int                   g_ctrl_fd   = -1;
@@ -197,11 +207,13 @@ int main(int argc, char *argv[]) {
     /* Self-pipe for signal-to-select wakeup. AF_UNIX socketpair gives bidirec-
      * tional fds; we only use one direction. Set O_NONBLOCK on the write end
      * so a flood of signals can never block the signal handler. */
+    int have_wake_pipe = 0;
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, g_wake_fd) == 0) {
         int flags = fcntl(g_wake_fd[1], F_GETFL, 0);
         if (flags >= 0) fcntl(g_wake_fd[1], F_SETFL, flags | O_NONBLOCK);
         int rflags = fcntl(g_wake_fd[0], F_GETFL, 0);
         if (rflags >= 0) fcntl(g_wake_fd[0], F_SETFL, rflags | O_NONBLOCK);
+        have_wake_pipe = 1;
     }
 
     signal(SIGWINCH, on_winch);
@@ -245,7 +257,9 @@ int main(int argc, char *argv[]) {
 
         /* Block indefinitely when no winch is in flight (input drives wakeups).
          * When a winch is pending, sleep only until the debounce window closes
-         * so send_resize() fires promptly. */
+         * so send_resize() fires promptly. With no self-pipe, fall back to a
+         * finite poll so signal flags are re-checked even though the handlers
+         * can't wake us (see WAKE_FALLBACK_POLL_MS). */
         struct timeval  tv;
         struct timeval *tvp = NULL;
         if (g_winch_pending) {
@@ -253,6 +267,10 @@ int main(int argc, char *argv[]) {
             if (remain < 0) remain = 0;
             tv.tv_sec  = remain / 1000;
             tv.tv_usec = (remain % 1000) * 1000;
+            tvp = &tv;
+        } else if (!have_wake_pipe) {
+            tv.tv_sec  = 0;
+            tv.tv_usec = WAKE_FALLBACK_POLL_MS * 1000;
             tvp = &tv;
         }
         int ret = select(nfds, &rfds, NULL, NULL, tvp);
