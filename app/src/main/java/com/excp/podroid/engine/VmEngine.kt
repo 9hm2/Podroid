@@ -29,6 +29,13 @@ interface VmEngine {
     /** Identifier for logs + the diagnostic dialog. Stable, lowercase. */
     val backendId: String
 
+    /**
+     * Wall-clock millis at which the VM reached Running, or null when not
+     * running. Defaulted so engine implementations compile unchanged; they
+     * override it to drive the uptime readout.
+     */
+    val runningSinceMs: Long? get() = null
+
     /** QEMU-specific. Null on backends that don't use QMP (e.g. AVF). */
     val qmpClient: QmpClient?
 

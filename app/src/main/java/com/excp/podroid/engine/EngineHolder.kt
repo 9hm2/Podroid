@@ -24,6 +24,7 @@ import com.excp.podroid.engine.avf.AvfEngine
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -85,6 +87,21 @@ class EngineHolder @Inject constructor(
     /** Last rule set we pushed into the engine, used to compute add/remove diffs. */
     @Volatile private var appliedRules: Set<PortForwardRule> = emptySet()
 
+    // Rules handed to the current engine's start(): these are baked into QEMU's
+    // launch cmdline at cold start, so they are already live the instant the VM
+    // reaches Running. The diff loop seeds appliedRules from this set on the
+    // →Running edge so an unchanged boot is a no-op (no re-add noise) and a rule
+    // removed during the boot window is still torn down.
+    @Volatile private var launchRules: Set<PortForwardRule> = emptySet()
+
+    // The engine instance started during the current selection cycle. @Singleton
+    // engines retain their last terminal state (e.g. Stopped) across a swap, so a
+    // freshly (re)selected engine that hasn't been started this cycle must surface
+    // Idle instead of that stale terminal value (else PodroidService treats the
+    // republished Stopped as actionable and tears down). Cleared on every fresh
+    // publish; set when start() runs.
+    @Volatile private var startedEngine: VmEngine? = null
+
     init {
         // 0. Publish the real first pick as soon as it resolves off-main, so the
         //    delegate flows (state/bootStage/consoleText via flatMapLatest) and
@@ -110,6 +127,10 @@ class EngineHolder @Inject constructor(
         //    flatMapLatest. Combined with state so we only push diffs when
         //    the VM is Running (initial rules go via start()).
         scope.launch {
+            // Tracks the previous emission's Running-ness so we can seed
+            // appliedRules from launchRules on the non-Running → Running edge
+            // exactly once per boot, not on every Running emission.
+            var wasRunning = false
             currentFlow.flatMapLatest { eng ->
                 portForwards.rules.combine(eng.state) { rules, state ->
                     Triple(eng, rules.toSet(), state)
@@ -117,10 +138,17 @@ class EngineHolder @Inject constructor(
             }.collect { (eng, rules, state) ->
                 if (state !is VmState.Running) {
                     appliedRules = emptySet()
+                    wasRunning = false
                     return@collect
                 }
-                val added   = rules - appliedRules
-                val removed = appliedRules - rules
+                if (!wasRunning) {
+                    // Entering Running: launchRules are already baked into the
+                    // launch cmdline, so treat them as applied. Unchanged boot →
+                    // added/removed empty; a rule removed mid-boot → removed.
+                    appliedRules = launchRules
+                    wasRunning = true
+                }
+                val (added, removed) = computeRuleDiff(applied = appliedRules, desired = rules)
                 // Track what is actually live so a transient add/remove failure
                 // doesn't permanently desync appliedRules from the engine: a
                 // failed add isn't recorded as applied (retried next diff), a
@@ -128,14 +156,24 @@ class EngineHolder @Inject constructor(
                 // first so a same-port churn frees the host port before re-add.
                 val live = appliedRules.toMutableSet()
                 for (r in removed) {
-                    runCatching { eng.removePortForward(r) }
-                        .onSuccess { live.remove(r) }
-                        .onFailure { android.util.Log.w(TAG, "removePortForward failed for $r", it) }
+                    try {
+                        eng.removePortForward(r)
+                        live.remove(r)
+                    } catch (c: CancellationException) {
+                        throw c // a swap cancelled the inner collector; abort, don't persist a stale set
+                    } catch (e: Exception) {
+                        android.util.Log.w(TAG, "removePortForward failed for $r", e)
+                    }
                 }
                 for (r in added) {
-                    runCatching { eng.addPortForward(r) }
-                        .onSuccess { live.add(r) }
-                        .onFailure { android.util.Log.w(TAG, "addPortForward failed for $r", it) }
+                    try {
+                        eng.addPortForward(r)
+                        live.add(r)
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (e: Exception) {
+                        android.util.Log.w(TAG, "addPortForward failed for $r", e)
+                    }
                 }
                 appliedRules = live
             }
@@ -205,6 +243,9 @@ class EngineHolder @Inject constructor(
         if (!firstPickPublished.compareAndSet(false, true)) return
         if (first !== _currentFlow.value) {
             android.util.Log.i(TAG, "first pick: ${_currentFlow.value.backendId} → ${first.backendId}")
+            // Fresh selection: this engine has not been started this cycle, so its
+            // surfaced state is normalized to Idle until start() runs.
+            startedEngine = null
             _currentFlow.value = first
         }
     }
@@ -234,12 +275,22 @@ class EngineHolder @Inject constructor(
         // happy-path swap. The residual window is teardown-only, not dual-run.
         android.util.Log.i(TAG, "swap: ${currentFlow.value.backendId} → ${next.backendId}")
         appliedRules = emptySet()
+        // Fresh selection: the swapped-in @Singleton engine may retain a stale
+        // terminal state from a prior cycle; clear the marker so the state flow
+        // surfaces Idle until this engine is started again.
+        startedEngine = null
         _currentFlow.value = next
     }
 
     // ── VmEngine: flows that follow the currently-selected engine ──────────
+    // A freshly (re)selected engine that hasn't been started this cycle has its
+    // retained terminal state (Stopped/Error) normalized to Idle, so a swap-back
+    // to a previously-Stopped @Singleton engine doesn't republish an actionable
+    // Stopped that PodroidService would treat as a teardown signal. Once start()
+    // marks the engine started, its real state (including a later Stopped) passes
+    // through unchanged.
     override val state: StateFlow<VmState> = currentFlow
-        .flatMapLatest { it.state }
+        .flatMapLatest { eng -> eng.state.map { st -> normalizeCycleState(eng, st) } }
         .stateIn(scope, SharingStarted.Eagerly, VmState.Idle)
 
     override val bootStage: StateFlow<String> = currentFlow
@@ -264,7 +315,26 @@ class EngineHolder @Inject constructor(
         // is always called off-main (PodroidService.launchPodroid → withContext
         // (Dispatchers.IO)), so awaiting the off-main first pick here is safe and
         // closes the seed→AVF race: the seed (QEMU) can never run by mistake.
-        publishFirstPick(firstPick.await())
+        //
+        // Recoverable first pick: firstPick is a one-shot Deferred. If its body
+        // threw (e.g. a non-IOException DataStore read), awaiting it again would
+        // rethrow forever and wedge every later Start. On failure, recompute the
+        // pick here; if that also fails, fall back to the QEMU seed already in
+        // _currentFlow so the VM stays startable rather than permanently broken.
+        val picked = try {
+            firstPick.await()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "first pick failed; recovering for start()", e)
+            runCatching { pick(settings.getEngineSelectionSnapshot()) }
+                .getOrElse { _currentFlow.value }
+        }
+        publishFirstPick(picked)
+        // Capture the launch set for the diff loop's →Running seeding, and mark
+        // this engine started so its state passes through un-normalized.
+        launchRules = portForwards.toSet()
+        startedEngine = current
         current.start(portForwards, config)
     }
     override fun stop() = current.stop()
@@ -274,7 +344,33 @@ class EngineHolder @Inject constructor(
     override suspend fun removePortForward(rule: PortForwardRule) = current.removePortForward(rule)
     override fun diagnosticsReport(): String = current.diagnosticsReport()
 
+    /**
+     * Normalize a per-engine state for the holder's surfaced [state] flow. A
+     * freshly (re)selected @Singleton engine that has not been started this
+     * cycle reports its retained terminal state (Stopped/Error); surface Idle
+     * for those until start() marks it [startedEngine]. Any non-terminal state,
+     * and every state of the started engine, passes through unchanged.
+     */
+    private fun normalizeCycleState(eng: VmEngine, st: VmState): VmState =
+        if (eng !== startedEngine && (st is VmState.Stopped || st is VmState.Error)) {
+            VmState.Idle
+        } else {
+            st
+        }
+
     companion object {
         private const val TAG = "EngineHolder"
+
+        /**
+         * Pure add/remove diff for the port-forward reconciliation loop:
+         * added = rules to push that aren't applied yet, removed = applied rules
+         * no longer desired. Extracted for unit testing the cold-start seeding
+         * contract (unchanged boot → both empty; rule removed mid-boot → removed).
+         */
+        fun computeRuleDiff(
+            applied: Set<PortForwardRule>,
+            desired: Set<PortForwardRule>,
+        ): Pair<Set<PortForwardRule>, Set<PortForwardRule>> =
+            (desired - applied) to (applied - desired)
     }
 }
