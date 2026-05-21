@@ -134,7 +134,7 @@ build_qemu() {
     qemu_ver=$(grep -E '^podroidQemuVersion=' "${SCRIPT_DIR}/gradle.properties" | cut -d= -f2)
     log "Building QEMU ${qemu_ver} for Android ARM64 (Docker)..."
     
-    docker build --build-arg "QEMU_VERSION=${qemu_ver}" \
+    docker build --network=host --build-arg "QEMU_VERSION=${qemu_ver}" \
         -t podroid-qemu-builder --target final "${SCRIPT_DIR}"
         
     log "Extracting QEMU artifacts..."
