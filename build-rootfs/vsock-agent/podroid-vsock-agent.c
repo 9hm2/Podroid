@@ -114,6 +114,22 @@ static void listener_remove(int idx) {
 
 /* ── Splice loop (TCP listener child) ───────────────────────────────────── */
 
+/*
+ * Close every inherited descriptor except std{in,out,err} and `keep`, so a
+ * forked splice child holds only its connection fd. We don't exec (CLOEXEC
+ * alone wouldn't drop these), so close them explicitly. getdtablesize() bounds
+ * the scan to the actual fd-table size; FD_CLOEXEC on every socket keeps the
+ * worst case small. close() errors on never-opened fds are ignored.
+ */
+static void close_inherited_fds(int keep) {
+    int maxfd = (int)getdtablesize();
+    if (maxfd < 0 || maxfd > 4096) maxfd = 4096;  /* sane cap */
+    for (int fd = 3; fd < maxfd; fd++) {
+        if (fd == keep) continue;
+        close(fd);
+    }
+}
+
 static ssize_t write_all(int fd, const void *buf, size_t n) {
     const char *p = (const char *)buf;
     size_t left = n;
@@ -129,6 +145,14 @@ static ssize_t write_all(int fd, const void *buf, size_t n) {
 static void splice_loop(int a, int b) {
     char buf[16384];
     fd_set rfds;
+    /* select() can't represent fds >= FD_SETSIZE without scribbling past the
+     * bitmap. FD_CLOEXEC on every socket keeps fd numbers low, but bail safely
+     * rather than corrupt the stack if the table ever climbs that high. */
+    if (a >= FD_SETSIZE || b >= FD_SETSIZE) {
+        close(a);
+        close(b);
+        return;
+    }
     int maxfd = (a > b ? a : b) + 1;
     int a_eof = 0, b_eof = 0;
     while (!a_eof || !b_eof) {
@@ -141,12 +165,20 @@ static void splice_loop(int a, int b) {
         }
         if (!a_eof && FD_ISSET(a, &rfds)) {
             ssize_t n = read(a, buf, sizeof(buf));
-            if (n <= 0) a_eof = 1;
+            if (n <= 0) {
+                a_eof = 1;
+                /* a→b is done: half-close b's write side so the peer sees
+                 * EOF, then keep draining b→a until b also EOFs. */
+                shutdown(b, SHUT_WR);
+            }
             else if (write_all(b, buf, (size_t)n) < 0) break;
         }
         if (!b_eof && FD_ISSET(b, &rfds)) {
             ssize_t n = read(b, buf, sizeof(buf));
-            if (n <= 0) b_eof = 1;
+            if (n <= 0) {
+                b_eof = 1;
+                shutdown(a, SHUT_WR);
+            }
             else if (write_all(a, buf, (size_t)n) < 0) break;
         }
     }
@@ -155,7 +187,10 @@ static void splice_loop(int a, int b) {
 }
 
 static int tcp_connect(const char *host, int port) {
-    int s = socket(AF_INET, SOCK_STREAM, 0);
+    /* SOCK_CLOEXEC: this fd is the splice child's connection fd. It is dup'd
+     * onto nothing and never exec'd, but CLOEXEC keeps it from leaking should
+     * an exec ever be added, and matches every other socket here. */
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (s < 0) return -1;
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
@@ -175,7 +210,14 @@ static int tcp_connect(const char *host, int port) {
 
 /* Forks the parent off — this function never returns in the child. */
 static void tcp_listener_main(int vport, const char *host, int gport) {
-    int s = socket(AF_VSOCK, SOCK_STREAM, 0);
+    /* New process group rooted at this listener's PID. Splice children forked
+     * below inherit it, so REMOVE can kill(-pgid) the listener AND every
+     * in-flight connection in one shot. setpgid(0,0) makes pgid == our pid. */
+    setpgid(0, 0);
+    /* SOCK_CLOEXEC so this listener fd never leaks into a splice grandchild
+     * that (in a future change) might exec; we still close(s) in the child
+     * below for the no-exec path. */
+    int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (s < 0) { LOG_E("vsock socket() failed: %s", strerror(errno)); _exit(1); }
     int one = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -195,12 +237,20 @@ static void tcp_listener_main(int vport, const char *host, int gport) {
     LOG_I("tcp listener: vsock:%d → %s:%d", vport, host, gport);
 
     for (;;) {
-        int c = accept(s, NULL, NULL);
+        /* accept4(SOCK_CLOEXEC): the connection fd `c` shouldn't leak into a
+         * future exec; it stays usable for splice_loop in this no-exec path. */
+        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) { if (errno == EINTR) continue; break; }
         pid_t child = fork();
         if (child < 0) { close(c); continue; }
         if (child == 0) {
-            close(s);
+            /* Drop every inherited fd except the accepted connection `c`: this
+             * listener's own `s`, the ctl listening socket, sibling
+             * forwarders' listeners, and (if forked from a live handle_add)
+             * the ctl connection + its dup. Without this they stay pinned for
+             * the connection's whole lifetime, blocking re-ADD of a removed
+             * vport with EADDRINUSE. tcp_connect()'s `t` is opened after. */
+            close_inherited_fds(c);
             int t = tcp_connect(host, gport);
             if (t < 0) { LOG_W("tcp connect %s:%d failed: %s", host, gport, strerror(errno)); _exit(1); }
             splice_loop(c, t);
@@ -219,8 +269,11 @@ static int spawn_tcp_listener(int vport, const char *host, int gport) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) tcp_listener_main(vport, host, gport);  // never returns
+    /* Set the child's pgid from the parent too (both sides race-free idiom):
+     * guarantees the group exists for kill(-pid) before REMOVE can fire. */
+    setpgid(pid, pid);
     if (listener_add(vport, pid) < 0) {
-        kill(pid, SIGTERM);
+        if (kill(-pid, SIGTERM) < 0 && errno == ESRCH) kill(pid, SIGTERM);
         return -1;
     }
     return 0;
@@ -262,7 +315,8 @@ static void handle_resize(int rows, int cols) {
      * unlike the old PL011 ttyS0 path that throttled TUI redraws to
      * ~14 KB/s. The getty also moved to hvc0 (per podroid-getty + the
      * `podroid.tty=hvc0` cmdline marker AVF now passes). */
-    int fd = open("/dev/hvc0", O_RDONLY | O_NOCTTY);
+    /* O_RDWR: TIOCSWINSZ is a set/write ioctl; O_RDONLY can be rejected. */
+    int fd = open("/dev/hvc0", O_RDWR | O_NOCTTY);
     if (fd >= 0) {
         struct winsize ws = { .ws_row = (unsigned short)rows, .ws_col = (unsigned short)cols };
         if (ioctl(fd, TIOCSWINSZ, &ws) < 0) {
@@ -287,7 +341,11 @@ static void handle_remove(int vport) {
     int idx = listener_find(vport);
     if (idx < 0) { LOG_W("REMOVE vsock:%d — no such listener", vport); return; }
     pid_t pid = listeners[idx].pid;
-    kill(pid, SIGTERM);
+    /* Kill the whole process group (listener + its in-flight splice children,
+     * which share pgid == listener pid) so existing connections stop too, not
+     * just the acceptor. Fall back to the bare pid if the group is somehow
+     * gone. */
+    if (kill(-pid, SIGTERM) < 0 && errno == ESRCH) kill(pid, SIGTERM);
     listener_remove(idx);
     remove_config_line(vport);
     LOG_I("REMOVE vsock:%d (pid %d)", vport, (int)pid);
@@ -301,10 +359,18 @@ static void trim_newline(char *s) {
 }
 
 static void ctl_loop(int fd) {
-    FILE *in = fdopen(dup(fd), "r");
+    /* dup() clears FD_CLOEXEC, so set it back: a TCP listener forked by a live
+     * ADD must not inherit this read handle. Capture dfd separately so the
+     * dup'd fd is closed on an fdopen failure instead of being orphaned. */
+    int dfd = dup(fd);
+    if (dfd >= 0) {
+        int dflags = fcntl(dfd, F_GETFD, 0);
+        if (dflags >= 0) fcntl(dfd, F_SETFD, dflags | FD_CLOEXEC);
+    }
+    FILE *in = (dfd >= 0) ? fdopen(dfd, "r") : NULL;
     FILE *out = fdopen(fd, "w");
     if (!in || !out) {
-        if (in) fclose(in);
+        if (in) fclose(in); else if (dfd >= 0) close(dfd);
         if (out) fclose(out); else close(fd);
         return;
     }
@@ -396,7 +462,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int s = socket(AF_VSOCK, SOCK_STREAM, 0);
+    int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (s < 0) { LOG_E("ctl socket() failed: %s", strerror(errno)); return 1; }
     int one = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -416,8 +482,16 @@ int main(int argc, char **argv) {
     LOG_I("ctl: listening on vsock:%d", ctl_vport);
 
     for (;;) {
-        int c = accept(s, NULL, NULL);
+        /* accept4(SOCK_CLOEXEC): the ctl connection fd (and its dup in
+         * ctl_loop) must not leak into TCP listeners forked by a live ADD. */
+        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) { if (errno == EINTR) continue; break; }
+        /* No SO_RCVTIMEO: the control channel is a single trusted, long-lived
+         * connection from the host that is idle most of the time — it only
+         * carries RESIZE/ADD/REMOVE on user events, often many minutes apart.
+         * A read timeout makes fgets() return NULL on idle, so ctl_loop tears
+         * the connection down, and the host (which never reconnects) then
+         * silently drops every later port-forward ADD. Block on fgets. */
         ctl_loop(c);  // ctl_loop takes ownership of `c` via fdopen — don't close here
     }
     return 0;

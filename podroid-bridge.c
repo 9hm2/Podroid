@@ -60,6 +60,11 @@ static long                  g_winch_last_ms  = 0;
  * polling timeout — keystroke round-trip drops by up to ~50 ms. */
 static int                   g_wake_fd[2] = { -1, -1 };
 
+/* Saved PTY-master termios captured before cfmakeraw(), restored in cleanup()
+ * so the PTY isn't left in raw mode if it ever outlives this process. */
+static struct termios        g_saved_termios;
+static int                   g_termios_saved = 0;
+
 static void on_winch(int sig) {
     (void)sig;
     g_winch = 1;
@@ -98,7 +103,11 @@ static int connect_unix(const char *path, int max_attempts, unsigned int delay_u
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
         int saved = errno;
         close(fd);
-        if (saved != ECONNREFUSED && saved != ENOENT) return -1;
+        /* Retry on the "not ready yet" / interrupted errors: ECONNREFUSED and
+         * ENOENT (QEMU still binding the socket), plus EINTR (a SIGWINCH/SIGTERM
+         * mid-connect) and EAGAIN/EINPROGRESS. Any other errno is a hard fail. */
+        if (saved != ECONNREFUSED && saved != ENOENT &&
+            saved != EINTR && saved != EAGAIN && saved != EINPROGRESS) return -1;
         if (attempt < max_attempts - 1) usleep(delay_us);
     }
     return -1;
@@ -138,6 +147,13 @@ static void send_resize(void) {
 }
 
 static void cleanup(void) {
+    /* Restore the PTY master to its pre-raw line discipline. The bridge
+     * normally owns the PTY for its whole lifetime, but if it ever outlives
+     * the bridge this prevents a stuck raw terminal. */
+    if (g_termios_saved) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_termios);
+        g_termios_saved = 0;
+    }
     if (g_term_fd >= 0) { close(g_term_fd); g_term_fd = -1; }
     if (g_ctrl_fd >= 0) { close(g_ctrl_fd); g_ctrl_fd = -1; }
     if (g_wake_fd[0] >= 0) { close(g_wake_fd[0]); g_wake_fd[0] = -1; }
@@ -164,6 +180,8 @@ int main(int argc, char *argv[]) {
 
     struct termios raw;
     if (tcgetattr(STDIN_FILENO, &raw) == 0) {
+        g_saved_termios = raw;   /* keep the pre-raw settings for cleanup() */
+        g_termios_saved = 1;
         cfmakeraw(&raw);
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
@@ -211,12 +229,16 @@ int main(int argc, char *argv[]) {
             send_resize();
         }
 
+        /* FD_SET past FD_SETSIZE scribbles past the bitmap. STDIN is fd 0 and
+         * g_term_fd is among the first fds opened, so this is defense-in-depth;
+         * a g_term_fd that high means the relay can't run, so bail cleanly. */
+        if (g_term_fd >= FD_SETSIZE) break;
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(STDIN_FILENO, &rfds);
         FD_SET(g_term_fd,    &rfds);
         int nfds = (g_term_fd > STDIN_FILENO ? g_term_fd : STDIN_FILENO) + 1;
-        if (g_wake_fd[0] >= 0) {
+        if (g_wake_fd[0] >= 0 && g_wake_fd[0] < FD_SETSIZE) {
             FD_SET(g_wake_fd[0], &rfds);
             if (g_wake_fd[0] >= nfds) nfds = g_wake_fd[0] + 1;
         }
@@ -242,6 +264,15 @@ int main(int argc, char *argv[]) {
             while (read(g_wake_fd[0], drain, sizeof(drain)) > 0) { /* spin */ }
         }
 
+        /* KNOWN LIMITATION (single-threaded full-duplex relay): both directions
+         * use blocking write_all(). If one peer's send buffer fills while the
+         * other direction also has data ready, write_all() blocks the loop and
+         * briefly starves the opposite direction until the buffer drains. A
+         * fully robust fix needs select-on-write + non-blocking writes + per-fd
+         * queues — a relay rewrite that risks the terminal path on BOTH
+         * backends. For a PTY <-> virtio-console terminal (the consumer reads
+         * continuously, so neither buffer stays full) this is theoretical and
+         * matches the upstream Termux relay shape; left as-is deliberately. */
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
             int n = read(STDIN_FILENO, buf, sizeof(buf));
             if (n <= 0) break;
