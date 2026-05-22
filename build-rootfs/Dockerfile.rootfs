@@ -1,40 +1,61 @@
 # build-rootfs/Dockerfile.rootfs
+#
+# Builds the Kali Linux (rolling) aarch64 root filesystem squashfs for the
+# Podroid NetHunter VM. systemd is PID 1; only a small core toolset ships in
+# the image — everything else is `apt install`-ed at runtime onto the
+# persistent ext4 overlay.
+#
+# The output asset keeps the historical name `alpine-rootfs.squashfs` so the
+# app-side extractor / QEMU mount path and build-all.sh need no change in
+# this increment.
 
 # ── Stage 1: cross-compile podroid-vsock-agent (musl-static aarch64) ────────
-# Uses qemu-user under the hood — no separate cross-toolchain needed.
 FROM --platform=linux/arm64 alpine:3.23 AS vsock-builder
 RUN apk add --no-cache musl-dev gcc make linux-headers
 WORKDIR /work
 COPY vsock-agent /work/vsock-agent
 RUN cd /work/vsock-agent && make CC=gcc
 
-# ── Stage 2: build the Alpine rootfs squashfs ───────────────────────────────
-FROM alpine:3.23 AS builder
+# ── Stage 2: debootstrap the Kali rootfs ────────────────────────────────────
+FROM debian:bookworm AS builder
 
-ARG ALPINE_RELEASE=3.23.4
-ARG ALPINE_ARCH=aarch64
+ARG KALI_SUITE=kali-rolling
+ARG KALI_MIRROR=http://http.kali.org/kali
 
-RUN apk add --no-cache curl squashfs-tools tar openssl libcap-utils
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        debootstrap qemu-user-static binfmt-support \
+        ca-certificates wget gnupg squashfs-tools \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
-RUN curl -L -o minirootfs.tar.gz \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_RELEASE%.*}/releases/${ALPINE_ARCH}/alpine-minirootfs-${ALPINE_RELEASE}-${ALPINE_ARCH}.tar.gz" \
- && mkdir rootfs \
- && tar -xzf minirootfs.tar.gz -C rootfs \
- && rm minirootfs.tar.gz
 
-# Pull in the vsock-agent binary built in stage 1.
+# Kali archive signing key. debootstrap verifies the repo Release file with
+# it here, and build-rootfs.sh drops the same dearmored keyring into the
+# rootfs at /usr/share/keyrings/ so the VM's apt trusts kali-rolling.
+RUN wget -qO kali-key.asc https://archive.kali.org/archive-key.asc \
+ && gpg --dearmor < kali-key.asc > /work/kali-archive-keyring.gpg
+
+# First stage on the build host, second stage in the aarch64 chroot via
+# qemu-user (binfmt must be registered on the Docker host — `docker buildx`
+# or `tonistiigi/binfmt --install arm64`).
+RUN debootstrap --arch=arm64 --foreign --variant=minbase \
+        --keyring=/work/kali-archive-keyring.gpg \
+        --components=main,contrib,non-free,non-free-firmware \
+        ${KALI_SUITE} /work/rootfs ${KALI_MIRROR}
+RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
+ && chroot /work/rootfs /debootstrap/debootstrap --second-stage
+
+# vsock-agent (AVF control channel) built in stage 1.
 COPY --from=vsock-builder /work/vsock-agent/podroid-vsock-agent /work/rootfs/usr/local/bin/podroid-vsock-agent
 
-ENV ALPINE_VERSION=${ALPINE_RELEASE}
 COPY files /work/files
 COPY build-rootfs.sh /work/build-rootfs.sh
 RUN chmod +x /work/build-rootfs.sh && /work/build-rootfs.sh
 
+# zstd squashfs — the guest kernel ships CONFIG_SQUASHFS_ZSTD=y. xattrs kept
+# (file capabilities on ping / newuidmap / dumpcap / etc.).
 RUN mksquashfs /work/rootfs /work/alpine-rootfs.squashfs \
-    -comp zstd -Xcompression-level 19 -all-root -noappend
-# (No -no-xattrs: rootless podman's newuidmap/newgidmap need their
-# file capabilities preserved; they're stored as security.capability xattr.)
+        -comp zstd -Xcompression-level 19 -all-root -noappend
 
 FROM scratch AS export
 COPY --from=builder /work/alpine-rootfs.squashfs /alpine-rootfs.squashfs
