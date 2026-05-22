@@ -1,0 +1,121 @@
+name: Build app
+
+# Manually-triggered build of the full Podroid app. The custom kernel,
+# initramfs, Alpine rootfs and QEMU are cross-compiled via Docker, then the
+# APK is assembled and uploaded as a downloadable artifact. Optionally
+# publishes a GitHub Release with the APK attached.
+#
+# NOTE: workflow_dispatch only shows the "Run workflow" button when this file
+# exists on the repository's default branch (main). Add it there to use it;
+# the `branch` input still lets you build any other branch's code.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to build
+        type: string
+        default: kali-nethunter
+      build_type:
+        description: APK build type
+        type: choice
+        options:
+          - debug
+          - release
+        default: debug
+      release_tag:
+        description: "Publish a Release with this tag (leave empty = artifact only)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - name: Checkout ${{ inputs.branch }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h /
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up QEMU (arm64 emulation for the Docker builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Optional: authenticates Docker Hub pulls to dodge anonymous rate limits.
+      # Skipped automatically when the DOCKERHUB_* secrets are not set.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build kernel + initramfs
+        run: ./build-all.sh initramfs
+
+      - name: Build Kali rootfs
+        run: ./build-all.sh rootfs
+
+      - name: Build QEMU
+        run: ./build-all.sh qemu
+
+      - name: Decode release keystore
+        if: inputs.build_type == 'release'
+        run: |
+          echo "${{ secrets.PODROID_RELEASE_KEYSTORE_BASE64 }}" \
+            | base64 -d > "${{ runner.temp }}/podroid-release.jks"
+
+      - name: Assemble APK
+        run: |
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            ./gradlew --no-daemon assembleRelease \
+              -PPODROID_RELEASE_STORE_FILE="${{ runner.temp }}/podroid-release.jks" \
+              -PPODROID_RELEASE_STORE_PASSWORD="${{ secrets.PODROID_RELEASE_STORE_PASSWORD }}" \
+              -PPODROID_RELEASE_KEY_ALIAS="${{ secrets.PODROID_RELEASE_KEY_ALIAS }}" \
+              -PPODROID_RELEASE_KEY_PASSWORD="${{ secrets.PODROID_RELEASE_KEY_PASSWORD }}"
+          else
+            ./gradlew --no-daemon assembleDebug
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: podroid-${{ inputs.build_type }}-apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      - name: Publish Release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          gh release create "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ inputs.branch }}" \
+            --title "Podroid ${{ inputs.release_tag }}" \
+            --generate-notes \
+            "$APK"
