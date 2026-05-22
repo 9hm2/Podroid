@@ -202,7 +202,22 @@ class PodroidService : Service() {
      */
     private suspend fun observeStateForShutdown() {
         var seenActive = false
+        // The engine is a process-lifetime @Singleton, so its StateFlow replays
+        // the PRIOR cycle's retained terminal state (Stopped/Error) the instant
+        // this fresh collector subscribes — before the engine.start() that
+        // launchPodroid is about to run flips it to Starting. Acting on that
+        // replayed value would teardown (stopSelf → onDestroy → serviceScope
+        // .cancel) the very start we are kicking off, cancelling it as "Job was
+        // cancelled" and leaving a new stale Error that poisons the next attempt
+        // too — so the VM never restarts until the process is killed. Consume the
+        // first emission as a baseline; only act on transitions that follow it.
+        var baselineConsumed = false
         engine.state.collect { state ->
+            if (!baselineConsumed) {
+                baselineConsumed = true
+                if (state is VmState.Starting || state is VmState.Running) seenActive = true
+                return@collect
+            }
             when (state) {
                 is VmState.Starting, is VmState.Running -> seenActive = true
                 is VmState.Idle -> {

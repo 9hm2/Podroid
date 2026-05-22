@@ -418,6 +418,17 @@ class QemuEngine @Inject constructor(
                 exitCode == 0 -> VmState.Stopped
                 else -> VmState.Error(formatExitError(exitCode, config.storageAccessEnabled))
             }
+        } catch (e: CancellationException) {
+            // The start() coroutine lives in PodroidService.serviceScope, which
+            // onDestroy() cancels on every stop/teardown. A stop destroys the
+            // process first (engine.stop() → proc.destroy()), so this cancellation
+            // IS the stop completing — finalize as a clean Stopped instead of
+            // mislabeling it Error("Job was cancelled"). A sticky Error here also
+            // poisoned the next start: its replayed value tore the new service
+            // down before the VM could boot. cleanup() is idempotent.
+            Log.d(TAG, "start() cancelled — finalizing as Stopped")
+            cleanup()
+            _state.value = VmState.Stopped
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start QEMU", e)
             _state.value = VmState.Error(e.message ?: "Unknown error")
