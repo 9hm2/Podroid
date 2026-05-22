@@ -479,6 +479,7 @@ adb shell run-as com.excp.podroid.debug cat files/console.log
 | `storage_access_enabled` | Boolean | false | Downloads sharing via virtio-9p |
 | `setup_done` | Boolean | false | Initial setup completed |
 | `ssh_enabled` | Boolean | false | Dropbear SSH in VM |
+| `usb_passthrough_enabled` | Boolean | false | Hot-plug USB devices into the VM (adds `-device qemu-xhci`; QEMU backend only) |
 | `port_forwards` | Set\<String\> | {} | `"tcp:8080:80"` format |
 | `dismissed_update_version` | String | "" | Last dismissed update version |
 
