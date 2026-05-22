@@ -2,56 +2,32 @@
 # Kali NetHunter rootfs configuration — runs in the Dockerfile.rootfs builder
 # stage against the debootstrapped Kali tree at /work/rootfs. systemd is PID 1.
 #
-# Keeps the in-image package set deliberately small (the user picked
-# "small core + runtime apt"); the rest of the Kali toolset is installed with
-# `apt install` inside the VM onto the persistent overlay.
+# The core package set is installed by `debootstrap --include` (see
+# Dockerfile.rootfs); this script is therefore pure file manipulation — no
+# mount, no chroot — so it runs inside an unprivileged `docker build` RUN.
+# The rest of the Kali toolset is `apt install`-ed inside the VM at runtime.
 set -eu
 ROOTFS=/work/rootfs
-
-# aarch64 chroot helper — runs a command inside the rootfs via qemu-user.
-in_rootfs() { chroot "$ROOTFS" /usr/bin/qemu-aarch64-static /bin/bash -c "$*"; }
 
 # ── APT: Kali repo + signing key in the proper places ───────────────────────
 install -Dm644 /work/kali-archive-keyring.gpg \
     "$ROOTFS/usr/share/keyrings/kali-archive-keyring.gpg"
 cat > "$ROOTFS/etc/apt/sources.list" <<'EOF'
-# Kali Linux rolling — signed by the keyring debootstrap/Podroid installed.
+# Kali Linux rolling — verified against the keyring Podroid installed.
 deb [signed-by=/usr/share/keyrings/kali-archive-keyring.gpg] http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
 EOF
-
-# Don't let apt pull recommends/docs into the shipped image — keeps it small.
 cat > "$ROOTFS/etc/apt/apt.conf.d/99podroid" <<'EOF'
 APT::Install-Recommends "false";
 APT::Install-Suggests "false";
 Acquire::Languages "none";
 EOF
 
-# ── Core package set (small; everything else via runtime `apt`) ─────────────
-# dpkg postinst scripts need a live /proc, /sys, /dev inside the chroot.
-mount -t proc proc "$ROOTFS/proc"
-mount --rbind /sys "$ROOTFS/sys"
-mount --rbind /dev "$ROOTFS/dev"
-
-# systemd + udev + dbus  : PID 1 and device/bus management
-# kali-archive-keyring   : keeps the key fresh after the first `apt upgrade`
-# openssh-server, sudo   : remote shell + privilege
-# net stack + wireless   : the minimum for passed-through USB Wi-Fi auditing
-# tigervnc + pulseaudio  : the in-app X11 viewer (desktop env via runtime apt)
-in_rootfs "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y \
-    systemd-sysv udev dbus libpam-systemd \
-    kali-archive-keyring ca-certificates \
-    openssh-server sudo \
-    iproute2 iputils-ping net-tools isc-dhcp-client \
-    iw wireless-tools rfkill wpasupplicant \
-    aircrack-ng \
-    usbutils pciutils kmod \
-    bash-completion less nano \
-    tigervnc-standalone-server tigervnc-common pulseaudio pulseaudio-utils \
-    && apt-get clean"
-
 # ── Accounts ────────────────────────────────────────────────────────────────
-# Kali NetHunter convention: root / kali.
-in_rootfs "echo 'root:kali' | chpasswd"
+# Kali NetHunter convention: root / kali. We can't run chpasswd in the
+# aarch64 rootfs from an x86_64 build host, so write the SHA-512 hash directly
+# (random salt → the stored hash differs per build, password stays "kali").
+ROOT_HASH=$(openssl passwd -6 kali)
+sed -i "s|^root:[^:]*:|root:${ROOT_HASH}:|" "$ROOTFS/etc/shadow"
 echo "podroid" > "$ROOTFS/etc/hostname"
 cat > "$ROOTFS/etc/hosts" <<'EOF'
 127.0.0.1 localhost podroid
@@ -59,16 +35,17 @@ cat > "$ROOTFS/etc/hosts" <<'EOF'
 EOF
 
 # ── Podroid VM bringup — systemd units + scripts ────────────────────────────
-# The bringup logic is ported verbatim from the OpenRC services; systemd just
-# orders it. Each script is a plain shell program run by a oneshot unit.
-mkdir -p "$ROOTFS/usr/local/sbin" "$ROOTFS/etc/systemd/system"
+# Bringup logic ported verbatim from the OpenRC services; systemd just orders
+# it. Each script is a plain shell program run by a oneshot/forking unit.
+mkdir -p "$ROOTFS/usr/local/sbin" "$ROOTFS/usr/local/bin" \
+         "$ROOTFS/etc/systemd/system"
 
 # --- podroid-bootstrap: cgroups, /dev mounts, ZRAM, sysctl, scheduler -------
 cat > "$ROOTFS/usr/local/sbin/podroid-bootstrap" <<'BOOT'
 #!/bin/sh
 echo "Loading kernel modules..." > /dev/console
 mount --make-rshared / 2>/dev/null
-mkdir -p /dev/pts /dev/shm /dev/mqueue 2>/dev/null
+mkdir -p /dev/pts /dev/shm /dev/mqueue /dev/net 2>/dev/null
 mountpoint -q /dev/pts    || mount -t devpts devpts /dev/pts -o gid=5,mode=0620,ptmxmode=0666,noexec,nosuid
 mountpoint -q /dev/shm    || mount -t tmpfs tmpfs /dev/shm -o noexec,nosuid,nodev,size=64m
 mountpoint -q /dev/mqueue || mount -t mqueue mqueue /dev/mqueue -o noexec,nosuid,nodev
@@ -77,7 +54,6 @@ depmod -a 2>/dev/null
 for q in /sys/block/vda/queue/scheduler /sys/block/vdb/queue/scheduler; do
     [ -w "$q" ] && echo mq-deadline > "$q" 2>/dev/null
 done
-mkdir -p /dev/net 2>/dev/null
 [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null
 # ZRAM swap (1.5x RAM, lz4).
 if [ -b /dev/zram0 ]; then
@@ -150,7 +126,7 @@ echo "Ready!" > /dev/console
 exit 0
 RDY
 
-# --- podroid-resize: hvc1 RESIZE lines → stty hvc0 --------------------------
+# --- resize daemon + winsize-restoring login wrapper (reused as-is) ---------
 cp /work/files/usr/local/bin/podroid-resize "$ROOTFS/usr/local/sbin/podroid-resize"
 cp /work/files/usr/local/bin/podroid-login  "$ROOTFS/usr/local/bin/podroid-login"
 chmod +x "$ROOTFS/usr/local/sbin/podroid-"* "$ROOTFS/usr/local/bin/podroid-login"
@@ -227,21 +203,20 @@ mkdir -p "$ROOTFS/etc/systemd/system/serial-getty@hvc0.service.d"
 cat > "$ROOTFS/etc/systemd/system/serial-getty@hvc0.service.d/podroid.conf" <<'EOF'
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty -o '-p -- \\u' -n -l /usr/local/bin/podroid-login -L 115200 %I xterm-256color
+ExecStart=-/sbin/agetty -n -l /usr/local/bin/podroid-login -L 115200 %I xterm-256color
 EOF
 
 # ── Enable units (build host is x86_64 — symlink directly, no systemctl) ────
 WANTS="$ROOTFS/etc/systemd/system/multi-user.target.wants"
 SYSINIT="$ROOTFS/etc/systemd/system/sysinit.target.wants"
-mkdir -p "$WANTS" "$SYSINIT"
+GETTY="$ROOTFS/etc/systemd/system/getty.target.wants"
+mkdir -p "$WANTS" "$SYSINIT" "$GETTY"
 ln -sf /etc/systemd/system/podroid-bootstrap.service "$SYSINIT/podroid-bootstrap.service"
 for u in podroid-network podroid-x11 podroid-resize podroid-ready; do
     ln -sf "/etc/systemd/system/$u.service" "$WANTS/$u.service"
 done
-ln -sf /lib/systemd/system/ssh.service               "$WANTS/ssh.service"
-ln -sf /lib/systemd/system/serial-getty@.service     "$WANTS/serial-getty@hvc0.service"
-# Don't block boot waiting on a real RTC / time sync, or on swap units.
-in_rootfs "systemctl mask systemd-timesyncd.service systemd-random-seed.service 2>/dev/null" || true
+ln -sf /lib/systemd/system/ssh.service           "$WANTS/ssh.service"
+ln -sf /lib/systemd/system/serial-getty@.service "$GETTY/serial-getty@hvc0.service"
 
 # ── profile.d (truecolor + X11 env) ─────────────────────────────────────────
 mkdir -p "$ROOTFS/etc/profile.d"
@@ -263,10 +238,7 @@ EOF
 rm -rf "$ROOTFS/usr/share/man" "$ROOTFS/usr/share/doc" \
        "$ROOTFS/usr/share/locale" "$ROOTFS/usr/share/info" \
        "$ROOTFS/var/lib/apt/lists/"* "$ROOTFS/var/cache/apt/archives/"*.deb
-# qemu-user shim was only needed for the cross-arch build steps.
+# qemu-user shim was only needed for the cross-arch debootstrap second stage.
 rm -f "$ROOTFS/usr/bin/qemu-aarch64-static"
 
-# Detach the chroot pseudo-filesystems before mksquashfs runs.
-umount -lR "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev" 2>/dev/null || true
-
-echo "Kali NetHunter rootfs built."
+echo "Kali NetHunter rootfs configured."
