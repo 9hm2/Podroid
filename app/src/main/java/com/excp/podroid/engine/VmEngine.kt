@@ -51,6 +51,20 @@ interface VmEngine {
     /** Create (or return the pre-started) terminal session wired to the bridge. */
     fun createTerminalSession(client: TerminalSessionClient): TerminalSession
 
+    /** Number of independent terminal channels (= UI tabs) this backend
+     *  exposes. Defaults to 1; backends that wire multiple virtio-console
+     *  gettys (QEMU) advertise more so the terminal UI shows a tab strip. */
+    val terminalChannelCount: Int get() = 1
+
+    /** Create / fetch the terminal session bound to channel [index]. The
+     *  default serves only the primary (index 0); backends advertising
+     *  [terminalChannelCount] > 1 override this to spawn extra bridges
+     *  against their additional channels. */
+    fun createTerminalSession(index: Int, client: TerminalSessionClient): TerminalSession {
+        require(index == 0) { "backend $backendId has no terminal at index $index" }
+        return createTerminalSession(client)
+    }
+
     /**
      * Apply a port-forward rule live to a running VM. No-op when state is not
      * Running — caller is expected to include the rule in [start]'s argument

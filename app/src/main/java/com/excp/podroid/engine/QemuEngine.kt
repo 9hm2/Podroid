@@ -60,8 +60,14 @@ class QemuEngine @Inject constructor(
     private val _bootStage = MutableStateFlow("")
 
     private var _terminalSession: TerminalSession? = null
+    // Tabs 2 and 3 — lazy bridge instances pointed at term1.sock / term2.sock
+    // (the extra virtio-consoles -> hvc2 / hvc3 in the guest). Created when
+    // the user selects the tab; finished in cleanup().
+    private val _extraSessions: Array<TerminalSession?> = arrayOfNulls(2)
 
     override val terminalSession: TerminalSession? get() = _terminalSession
+
+    override val terminalChannelCount: Int = 3
     override val bootStage: StateFlow<String> = _bootStage.asStateFlow()
 
     override val backendId: String = "qemu"
@@ -239,6 +245,36 @@ class QemuEngine @Inject constructor(
 
         _terminalSession = sess
         Log.d(TAG, "Terminal session created in Qemu singleton")
+        return sess
+    }
+
+    override fun createTerminalSession(index: Int, client: TerminalSessionClient): TerminalSession {
+        if (index == 0) return createTerminalSession(client)
+        require(index in 1..2) { "QemuEngine has no terminal at index $index" }
+        val slot = index - 1
+        _extraSessions[slot]?.let { return it }
+
+        val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
+        if (!bridgeExe.exists()) {
+            throw IllegalStateException("podroid-bridge not found at ${bridgeExe.absolutePath}")
+        }
+        // Tab → guest tty: index 1 -> term1.sock / hvc2, index 2 -> term2.sock / hvc3.
+        // The 3rd bridge arg names the tty so RESIZE writes on the shared
+        // ctrl.sock carry "RESIZE hvcN rows cols" — podroid-resize stty's the
+        // right tty instead of always clobbering hvc0.
+        val termSock = if (index == 1) term1SockPath else term2SockPath
+        val ttyName  = if (index == 1) "hvc2"        else "hvc3"
+        val sess = TerminalSession(
+            bridgeExe.absolutePath,
+            context.filesDir.absolutePath,
+            arrayOf(bridgeExe.absolutePath, termSock, ctrlSockPath, ttyName),
+            null,
+            2000,
+            client,
+        )
+        sess.updateSize(80, 24, 0, 0)
+        _extraSessions[slot] = sess
+        Log.d(TAG, "Bridge spawned for tab $index ($ttyName / $termSock)")
         return sess
     }
 
@@ -472,6 +508,10 @@ class QemuEngine @Inject constructor(
         process = null
         _terminalSession?.finishIfRunning()
         _terminalSession = null
+        for (i in _extraSessions.indices) {
+            _extraSessions[i]?.finishIfRunning()
+            _extraSessions[i] = null
+        }
         sessionClientDelegate = null
         _consoleText.value = ""
         _runningSinceMs = null

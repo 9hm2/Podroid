@@ -466,6 +466,34 @@ class TerminalViewModel @Inject constructor(
     var session: TerminalSession? = null
         private set
 
+    // ── Multi-tab terminal ────────────────────────────────────────────────
+    // QemuEngine exposes 3 virtio-console channels (hvc0/hvc2/hvc3); other
+    // backends advertise 1. Each tab gets its own TerminalSession via the
+    // engine's indexed factory; the engine caches the sessions so reselecting
+    // a tab returns the same bridge subprocess.
+    val terminalChannelCount: Int = engine.terminalChannelCount
+
+    var currentTab: Int by mutableStateOf(0)
+        private set
+
+    /** Active session for the currently-selected tab, or null if creation
+     *  failed (e.g. AVF backend asked for a tab > 0). */
+    val currentSession: TerminalSession?
+        get() = if (currentTab == 0) {
+            session
+        } else {
+            runCatching { engine.createTerminalSession(currentTab, sessionClient) }
+                .onFailure { e -> Log.w(TAG, "createTerminalSession($currentTab) failed: ${e.message}") }
+                .getOrNull()
+        }
+
+    fun selectTab(index: Int) {
+        if (index !in 0 until terminalChannelCount) return
+        currentTab = index
+        // Trigger lazy bridge spawn for non-primary tabs by touching the getter.
+        currentSession
+    }
+
     var extraCtrl by mutableStateOf(false)
         private set
     var extraAlt by mutableStateOf(false)
@@ -654,6 +682,7 @@ class TerminalViewModel @Inject constructor(
     fun resetOnRestart() {
         attached = false
         session = null
+        currentTab = 0
     }
 
     /**
