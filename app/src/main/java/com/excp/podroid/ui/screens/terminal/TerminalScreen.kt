@@ -65,9 +65,13 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect as ComposeLaunchedEffect
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -285,16 +289,32 @@ fun TerminalScreen(
                         }
                     }
                 }
+                // Swipe to switch tabs. A horizontal drag past the threshold
+                // (~80 dp) cycles forward / backward through the tab list.
+                // Terminal interactions (tap, long-press, vertical scroll) are
+                // unaffected; horizontal drags inside the terminal grid are
+                // rare enough that consuming them for tab navigation is a fair
+                // trade. Disabled when only one channel exists.
+                val swipeThresholdPx = with(LocalDensity.current) { 80.dp.toPx() }
+                var dragAcc by remember { mutableStateOf(0f) }
+                val dragState = rememberDraggableState { delta -> dragAcc += delta }
+                val swipeMod = if (viewModel.terminalChannelCount > 1) {
+                    Modifier.draggable(
+                        state = dragState,
+                        orientation = Orientation.Horizontal,
+                        onDragStopped = {
+                            if (dragAcc >  swipeThresholdPx) viewModel.selectTab(viewModel.currentTab - 1)
+                            else if (dragAcc < -swipeThresholdPx) viewModel.selectTab(viewModel.currentTab + 1)
+                            dragAcc = 0f
+                        },
+                    )
+                } else Modifier
                 // Hoisted into its own composable so toggling chrome state in the
                 // parent (showQuickSettings, showExtraKeys, hapticsEnabled, modifier
-                // keys, etc.) doesn't invalidate the AndroidView slot. TerminalSurface
-                // takes only the ViewModel (stable @HiltViewModel) so Compose's
-                // restart-scope skipping kicks in: chrome toggles → parent recomposes,
-                // surface skips. The terminal pixels never re-route through Compose
-                // unless something the surface actually reads has changed.
+                // keys, etc.) doesn't invalidate the AndroidView slot.
                 TerminalSurface(
                     viewModel = viewModel,
-                    modifier = Modifier.weight(1f).fillMaxSize(),
+                    modifier = Modifier.weight(1f).fillMaxSize().then(swipeMod),
                 )
             }
         }

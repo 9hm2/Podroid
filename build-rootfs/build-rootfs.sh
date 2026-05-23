@@ -204,8 +204,13 @@ EOF
 mkdir -p "$ROOTFS/etc/systemd/system/serial-getty@.service.d"
 cat > "$ROOTFS/etc/systemd/system/serial-getty@.service.d/podroid.conf" <<'EOF'
 [Service]
+# Autologin as root on every Podroid tty — the VM is a single-user dev
+# environment that boots into a privileged shell instantly. agetty -a root
+# adds "-f root" to the login command line so /bin/login skips the
+# password prompt. podroid-login stays in front to restore winsize
+# (virtio-console resets it to 0x0 on every reopen).
 ExecStart=
-ExecStart=-/sbin/agetty -n -l /usr/local/bin/podroid-login -L 115200 %I xterm-256color
+ExecStart=-/sbin/agetty -a root -l /usr/local/bin/podroid-login -L 115200 %I xterm-256color
 EOF
 
 # ── Enable units (build host is x86_64 — symlink directly, no systemctl) ────
