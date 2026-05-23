@@ -197,10 +197,12 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-# getty on the virtio-console the Android terminal bridge attaches to, with
-# the winsize-restoring login wrapper. systemd templates serial-getty@.
-mkdir -p "$ROOTFS/etc/systemd/system/serial-getty@hvc0.service.d"
-cat > "$ROOTFS/etc/systemd/system/serial-getty@hvc0.service.d/podroid.conf" <<'EOF'
+# getty on the virtio-consoles the Android terminal bridge attaches to, with
+# the winsize-restoring login wrapper. The override is template-wide
+# (serial-getty@.service.d/) so it applies to every enabled instance —
+# hvc0 (primary tab), hvc2 (tab 2), hvc3 (tab 3).
+mkdir -p "$ROOTFS/etc/systemd/system/serial-getty@.service.d"
+cat > "$ROOTFS/etc/systemd/system/serial-getty@.service.d/podroid.conf" <<'EOF'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty -n -l /usr/local/bin/podroid-login -L 115200 %I xterm-256color
@@ -216,7 +218,14 @@ for u in podroid-network podroid-x11 podroid-resize podroid-ready; do
     ln -sf "/etc/systemd/system/$u.service" "$WANTS/$u.service"
 done
 ln -sf /lib/systemd/system/ssh.service           "$WANTS/ssh.service"
-ln -sf /lib/systemd/system/serial-getty@.service "$GETTY/serial-getty@hvc0.service"
+# Three serial gettys for the planned 3-tab in-app terminal. The bridge on
+# the Android side connects each tab to terminal.sock / term1.sock /
+# term2.sock; QEMU exposes those as hvc0 / hvc2 / hvc3 in the VM (hvc1 is
+# the resize control channel — no getty).
+for _hvc in hvc0 hvc2 hvc3; do
+    ln -sf /lib/systemd/system/serial-getty@.service \
+        "$GETTY/serial-getty@${_hvc}.service"
+done
 
 # ── profile.d (truecolor + X11 env) ─────────────────────────────────────────
 mkdir -p "$ROOTFS/etc/profile.d"
