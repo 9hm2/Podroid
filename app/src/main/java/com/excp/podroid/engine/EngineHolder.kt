@@ -328,6 +328,7 @@ class EngineHolder @Inject constructor(
     override val terminalSession: TerminalSession? get() = current.terminalSession
     override val backendId: String get() = current.backendId
     override val qmpClient: QmpClient? get() = current.qmpClient
+    override val terminalChannelCount: Int get() = current.terminalChannelCount
     override var sessionClientDelegate: TerminalSessionClient?
         get() = current.sessionClientDelegate
         set(v) { current.sessionClientDelegate = v }
@@ -363,6 +364,8 @@ class EngineHolder @Inject constructor(
     override fun stop() = current.stop()
     override fun createTerminalSession(client: TerminalSessionClient) =
         current.createTerminalSession(client)
+    override fun createTerminalSession(index: Int, client: TerminalSessionClient) =
+        current.createTerminalSession(index, client)
     override suspend fun addPortForward(rule: PortForwardRule) = current.addPortForward(rule)
     override suspend fun removePortForward(rule: PortForwardRule) = current.removePortForward(rule)
     override fun diagnosticsReport(): String = current.diagnosticsReport()
