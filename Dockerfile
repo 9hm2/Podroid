@@ -136,7 +136,10 @@ RUN cd linux-${KERNEL_VERSION} \
                   DECOMPRESS_ZSTD ZSTD_DECOMPRESS \
                   IKCONFIG IKCONFIG_PROC BINFMT_MISC \
                   VSOCKETS VIRTIO_VSOCKETS \
-                  RFKILL LEDS_CLASS CFG80211 MAC80211 RTW88 BT; do \
+                  RFKILL LEDS_CLASS CFG80211 MAC80211 RTW88 BT \
+                  USB USB_SUPPORT WLAN \
+                  RTW88_8821AU RTW88_8812AU RTW88_8814AU \
+                  FW_LOADER_COMPRESS FW_LOADER_COMPRESS_ZSTD UNICODE; do \
            grep -q "^CONFIG_${opt}=y\$" .config \
                || { echo "FATAL: CONFIG_${opt} is not =y after merge" >&2; \
                     grep "CONFIG_${opt}" .config >&2; exit 1; }; \
