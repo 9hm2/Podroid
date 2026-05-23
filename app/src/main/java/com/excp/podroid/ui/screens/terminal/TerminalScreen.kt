@@ -42,6 +42,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
@@ -270,6 +272,21 @@ fun TerminalScreen(
             }
 
             is VmState.Running -> {
+                // Tab strip for backends that expose >1 virtio-console terminal
+                // channel (QEMU's hvc0/hvc2/hvc3). Reading viewModel.currentTab
+                // here also tracks it for the AndroidView update lambda below,
+                // which swaps the TerminalView's session on tab change.
+                if (viewModel.terminalChannelCount > 1) {
+                    TabRow(selectedTabIndex = viewModel.currentTab) {
+                        repeat(viewModel.terminalChannelCount) { i ->
+                            Tab(
+                                selected = viewModel.currentTab == i,
+                                onClick = { viewModel.selectTab(i) },
+                                text = { Text("Term ${i + 1}") },
+                            )
+                        }
+                    }
+                }
                 // Hoisted into its own composable so toggling chrome state in the
                 // parent (showQuickSettings, showExtraKeys, hapticsEnabled, modifier
                 // keys, etc.) doesn't invalidate the AndroidView slot. TerminalSurface
@@ -460,9 +477,22 @@ private fun TerminalSurface(
             }
         }
 
+        // Multi-tab: when the user switches tabs the ViewModel's currentTab
+        // mutableStateOf flips; reading it here tracks the State so the
+        // AndroidView's update lambda runs and re-attaches the active session.
+        // The DisposableEffect above already handles the first-time bind.
+        val activeTab = viewModel.currentTab
         AndroidView(
             factory = { view },
-            update = { },
+            update = { v ->
+                val sess = viewModel.currentSession ?: return@AndroidView
+                if (v.mTermSession !== sess) {
+                    v.mTermSession = sess
+                    v.mEmulator = sess.emulator
+                    v.onScreenUpdated()
+                    v.post { v.updateSize(); v.onScreenUpdated() }
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         )
     }

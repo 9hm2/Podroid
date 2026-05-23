@@ -22,7 +22,12 @@
  *              refreshes a timestamp; send_resize() fires once after the
  *              burst has been quiet for RESIZE_DEBOUNCE_MS.
  *
- * Args: <terminal.sock> <ctrl.sock>
+ * Args: <terminal.sock> <ctrl.sock> [tty-name]
+ *   [tty-name] (optional): if set, RESIZE messages are emitted as
+ *   "RESIZE <name> rows cols\n" so a single ctrl channel can carry
+ *   independent SIGWINCH streams from multiple bridge instances (the
+ *   in-app multi-tab terminal UI). Without it the bridge writes the
+ *   legacy "RESIZE rows cols\n" and the resize daemon targets hvc0.
  */
 
 #include <errno.h>
@@ -134,6 +139,10 @@ static int write_all(int fd, const char *buf, int n) {
 }
 
 static const char *g_ctrl_path = NULL;
+// Optional tty-name argv slot (e.g. "hvc0", "hvc2"): when present, RESIZE
+// messages are prefixed with the name so one ctrl channel can disambiguate
+// SIGWINCH bursts from several bridge instances (the in-app multi-tab UI).
+static const char *g_tty_name  = NULL;
 
 static void send_resize(void) {
     // Lazy reconnect: ctrl.sock may not have been ready at startup (QEMU still
@@ -147,8 +156,10 @@ static void send_resize(void) {
     memset(&ws, 0, sizeof(ws));
     if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) < 0) return;
     if (ws.ws_row == 0 || ws.ws_col == 0) return;
-    char msg[64];
-    int len = snprintf(msg, sizeof(msg), "RESIZE %d %d\n", ws.ws_row, ws.ws_col);
+    char msg[80];
+    int len = g_tty_name
+        ? snprintf(msg, sizeof(msg), "RESIZE %s %d %d\n", g_tty_name, ws.ws_row, ws.ws_col)
+        : snprintf(msg, sizeof(msg), "RESIZE %d %d\n", ws.ws_row, ws.ws_col);
     if (len > 0 && write_all(g_ctrl_fd, msg, len) < 0) {
         // Broken pipe — tear down and reconnect next time.
         close(g_ctrl_fd);
@@ -182,6 +193,7 @@ int main(int argc, char *argv[]) {
         }
     }
     if (argc < 3) return 1;
+    if (argc >= 4) g_tty_name = argv[3];
 
     g_term_fd = connect_unix(argv[1], 50, 200000);
     if (g_term_fd < 0) {
