@@ -49,6 +49,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.border
@@ -129,6 +130,7 @@ fun TerminalScreen(
 ) {
     val context = LocalContext.current
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
+    var showCommands by remember { mutableStateOf(false) }
     val fontSize by viewModel.terminalFontSize.collectAsStateWithLifecycle()
     val showQuickSettings by viewModel.showQuickSettings.collectAsStateWithLifecycle()
     val showExtraKeys by viewModel.showExtraKeysFlow.collectAsStateWithLifecycle()
@@ -163,6 +165,10 @@ fun TerminalScreen(
 
     val colorTheme by viewModel.terminalColorTheme.collectAsStateWithLifecycle()
     val terminalFont by viewModel.terminalFont.collectAsStateWithLifecycle()
+
+    if (showCommands) {
+        CustomCommandsSheet(viewModel = viewModel, onDismiss = { showCommands = false })
+    }
 
     if (showQuickSettings) {
         // Pass the screen's viewModel explicitly so QuickSettingsDialog uses
@@ -206,6 +212,10 @@ fun TerminalScreen(
                 }
             },
             actions = {
+                IconButton(onClick = { showCommands = true }) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Custom commands")
+                }
+                Spacer(Modifier.width(PodroidTokens.Spacing.XS))
                 IconButton(onClick = onNavigateToX11) {
                     Icon(Icons.Default.DesktopWindows, contentDescription = "X11 screen")
                 }

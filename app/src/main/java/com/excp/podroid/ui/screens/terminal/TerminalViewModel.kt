@@ -64,6 +64,7 @@ class TerminalViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val engine: VmEngine,
     private val settingsRepository: SettingsRepository,
+    private val customCommandsRepository: com.excp.podroid.data.repository.CustomCommandsRepository,
 ) : ViewModel() {
 
     val vmState: StateFlow<VmState> = engine.state
@@ -802,6 +803,44 @@ class TerminalViewModel @Inject constructor(
             engine.sessionClientDelegate = null
         }
         attached = false
+    }
+
+    // ── Custom Commands ──────────────────────────────────────────────────────
+    // User-defined one-tap commands (the NetHunter analog). The sheet UI reads
+    // [customCommands]; [runCommand] writes the command to the active tab's
+    // session (or hops to the next tab first when openNewTab is set).
+    // runCommand is a no-op when the VM is not Running — the sheet additionally
+    // gates the Run buttons on vmState so the failure mode is visible.
+    val customCommands: StateFlow<List<com.excp.podroid.data.repository.CustomCommand>> =
+        customCommandsRepository.commands
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun addCustomCommand(name: String, command: String, openNewTab: Boolean) {
+        if (name.isBlank() || command.isBlank()) return
+        viewModelScope.launch { customCommandsRepository.add(name.trim(), command.trim(), openNewTab) }
+    }
+
+    fun removeCustomCommand(id: String) {
+        viewModelScope.launch { customCommandsRepository.remove(id) }
+    }
+
+    fun runCommand(cc: com.excp.podroid.data.repository.CustomCommand) {
+        if (engine.state.value !is VmState.Running) return
+        val targetTab =
+            if (cc.openNewTab && terminalChannelCount > 1)
+                (currentTab + 1) % terminalChannelCount
+            else currentTab
+        if (targetTab != currentTab) selectTab(targetTab)
+        viewModelScope.launch {
+            // Fresh tabs need a moment to spawn the bridge + reach the shell
+            // prompt; without the wait the command races getty / login and the
+            // first chars get eaten. With autologin the typical settle is
+            // ~200 ms; 400 ms is a safe headroom on slow boots.
+            if (targetTab != currentTab || cc.openNewTab) {
+                withContext(Dispatchers.Default) { kotlinx.coroutines.delay(400) }
+            }
+            runCatching { currentSession?.write(cc.command + "\n") }
+        }
     }
 
     companion object {
