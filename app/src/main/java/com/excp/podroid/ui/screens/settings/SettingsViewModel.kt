@@ -178,6 +178,13 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setUsbPassthroughEnabled(value) }
     }
 
+    val gpsBridgeEnabled: StateFlow<Boolean> = settingsRepository.gpsBridgeEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    fun setGpsBridgeEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setGpsBridgeEnabled(value) }
+    }
+
     fun setVmRamMb(value: Int) {
         viewModelScope.launch { settingsRepository.setVmRamMb(value) }
     }

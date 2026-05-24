@@ -39,6 +39,11 @@ interface VmEngine {
     /** QEMU-specific. Null on backends that don't use QMP (e.g. AVF). */
     val qmpClient: QmpClient?
 
+    /** Filesystem path of the GPS NMEA virtio-console socket; null on
+     *  backends that don't expose one. The GPS bridge connects here as a
+     *  client while the VM is Running. */
+    val gpsSockPath: String? get() = null
+
     /**
      * Proxy delegate forwarded to the terminal session client. Set by the
      * terminal UI layer so the engine can relay events before the UI attaches.
@@ -98,4 +103,5 @@ data class VmConfig(
     val verboseLogging: Boolean = false,
     val x11Dpi: Int = 96,
     val usbPassthroughEnabled: Boolean = false,
+    val gpsBridgeEnabled: Boolean = false,
 )

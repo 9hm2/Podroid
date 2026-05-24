@@ -328,6 +328,7 @@ class EngineHolder @Inject constructor(
     override val terminalSession: TerminalSession? get() = current.terminalSession
     override val backendId: String get() = current.backendId
     override val qmpClient: QmpClient? get() = current.qmpClient
+    override val gpsSockPath: String? get() = current.gpsSockPath
     override val terminalChannelCount: Int get() = current.terminalChannelCount
     override var sessionClientDelegate: TerminalSessionClient?
         get() = current.sessionClientDelegate

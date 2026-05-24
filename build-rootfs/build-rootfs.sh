@@ -223,6 +223,20 @@ for u in podroid-network podroid-x11 podroid-resize podroid-ready; do
     ln -sf "/etc/systemd/system/$u.service" "$WANTS/$u.service"
 done
 ln -sf /lib/systemd/system/ssh.service           "$WANTS/ssh.service"
+
+# gpsd: bound to the virtio-console GPS channel exposed by the Android GPS
+# bridge (QemuEngine.gpsSockPath → /dev/hvc4 in the guest). gpsd parses the
+# NMEA the bridge writes and serves clients (kismet, gpsmon, wifite) on
+# TCP 2947. Listen on all addresses so peers on the host LAN can attach too.
+mkdir -p "$ROOTFS/etc/default"
+cat > "$ROOTFS/etc/default/gpsd" <<'EOF'
+START_DAEMON="true"
+USBAUTO="false"
+DEVICES="/dev/hvc4"
+GPSD_OPTIONS="-n -G"
+EOF
+ln -sf /lib/systemd/system/gpsd.service          "$WANTS/gpsd.service"
+ln -sf /lib/systemd/system/gpsd.socket           "$WANTS/gpsd.socket"
 # Three serial gettys for the planned 3-tab in-app terminal. The bridge on
 # the Android side connects each tab to terminal.sock / term1.sock /
 # term2.sock; QEMU exposes those as hvc0 / hvc2 / hvc3 in the VM (hvc1 is

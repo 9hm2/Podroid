@@ -94,6 +94,9 @@ class QemuEngine @Inject constructor(
     // Gettys are wired up in the rootfs via serial-getty@hvc2 / @hvc3.
     val term1SockPath: String get() = "${context.filesDir.absolutePath}/term1.sock"
     val term2SockPath: String get() = "${context.filesDir.absolutePath}/term2.sock"
+    // GPS NMEA channel: Android Location → hvc4 in the guest, where gpsd
+    // reads it as a serial GPS source. Only exposed when gpsBridgeEnabled.
+    override val gpsSockPath: String get() = "${context.filesDir.absolutePath}/gps.sock"
 
     /**
      * Last QEMU process exit code (null until it exits) + a bounded tail of
@@ -320,6 +323,7 @@ class QemuEngine @Inject constructor(
         File(ctrlSockPath).delete()
         File(term1SockPath).delete()
         File(term2SockPath).delete()
+        File(gpsSockPath).delete()
         File(qmpSocketPath).delete()
 
         try {
@@ -520,6 +524,7 @@ class QemuEngine @Inject constructor(
         File(ctrlSockPath).delete()
         File(term1SockPath).delete()
         File(term2SockPath).delete()
+        File(gpsSockPath).delete()
         _bootStage.value = ""
     }
 
@@ -645,6 +650,12 @@ class QemuEngine @Inject constructor(
         args += "-device";  args += "virtconsole,chardev=term1,name=org.podroid.term1"
         args += "-chardev"; args += "socket,id=term2,path=$term2SockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=term2,name=org.podroid.term2"
+        // GPS NMEA stream from Android Location → hvc4. Only attached when the
+        // feature is enabled; gpsd inside the VM is wired to /dev/hvc4.
+        if (config.gpsBridgeEnabled) {
+            args += "-chardev"; args += "socket,id=gps0,path=$gpsSockPath,server=on,wait=off"
+            args += "-device";  args += "virtconsole,chardev=gps0,name=org.podroid.gps"
+        }
 
         args += "-display"; args += "none"
         args += "-qmp";     args += "unix:$qmpSocketPath,server,nowait"

@@ -319,6 +319,32 @@ fun SettingsScreen(
                             bottom = PodroidTokens.Spacing.SM,
                         ),
                     )
+
+                    PodroidSectionLabel("GPS bridge")
+                    val gpsBridge by viewModel.gpsBridgeEnabled.collectAsStateWithLifecycle()
+                    PodroidListRow(
+                        label = "Stream Android Location into the VM",
+                        rightSlot = {
+                            PodroidSwitch(
+                                checked = gpsBridge,
+                                onCheckedChange = { viewModel.setGpsBridgeEnabled(it) },
+                                enabled = vmNotRunning,
+                            )
+                        },
+                    )
+                    Text(
+                        text = "Pipes Android GPS as NMEA into /dev/hvc4 in the VM; gpsd serves it " +
+                            "on TCP 2947 to kismet / wifite / gpsmon. Requires the system Location " +
+                            "permission (grant in app info). Adds a virtio-console at boot — " +
+                            "restart the VM to apply. QEMU backend only.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(
+                            start = PodroidTokens.Spacing.MD,
+                            end = PodroidTokens.Spacing.MD,
+                            bottom = PodroidTokens.Spacing.SM,
+                        ),
+                    )
                 }
 
                 // ── ABOUT ─────────────────────────────────────────────
