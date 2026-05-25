@@ -20,6 +20,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -74,6 +75,25 @@ class GpsBridgeManager @Inject constructor(
         scope.launch { writeNmeaLine(msg) }
     }
 
+    // PRN list of satellites used in the *current* fix, in NMEA-conformant
+    // numbering (see toNmeaPrn). Updated from GnssStatus.Callback; copied
+    // into our synthesised $GPGSA so gpsd can correlate against $GPGSV and
+    // derive XDOP/YDOP/PDOP plus the "Used N" counter. Empty when the device
+    // has no raw GNSS (network/fused-only) — GSA then carries no PRNs, same
+    // as before this callback was added.
+    @Volatile private var usedPrns: List<Int> = emptyList()
+    private val gnssStatusCallback = object : GnssStatus.Callback() {
+        override fun onSatelliteStatusChanged(status: GnssStatus) {
+            val list = ArrayList<Int>(status.satelliteCount)
+            for (i in 0 until status.satelliteCount) {
+                if (status.usedInFix(i)) {
+                    list.add(toNmeaPrn(status.getConstellationType(i), status.getSvid(i)))
+                }
+            }
+            usedPrns = list
+        }
+    }
+
     // Only backends that expose a GPS channel (QEMU; nullable on AVF) yield a
     // path. When null the bridge stays inactive — same code path as "VM not up".
     private val socketPath: String? get() = engine.gpsSockPath
@@ -108,6 +128,16 @@ class GpsBridgeManager @Inject constructor(
             runCatching {
                 locationManager.addNmeaListener(nmeaListener, Handler(Looper.getMainLooper()))
             }.onFailure { e -> Log.d(TAG, "addNmeaListener unavailable: ${e.message}") }
+            // GnssStatus.Callback tells us which satellites Android actually
+            // used in the fix — we feed those PRNs into $GPGSA so gpsd can
+            // light up XDOP/YDOP/PDOP/EPX/EPY (cgps shows them as n/a
+            // without a PRN list). Silently no-ops on devices without raw
+            // GNSS access (fused-only locations).
+            runCatching {
+                locationManager.registerGnssStatusCallback(
+                    gnssStatusCallback, Handler(Looper.getMainLooper()),
+                )
+            }.onFailure { e -> Log.d(TAG, "registerGnssStatusCallback unavailable: ${e.message}") }
         } catch (se: SecurityException) {
             Log.w(TAG, "requestLocationUpdates denied: ${se.message}")
             started = false
@@ -119,6 +149,8 @@ class GpsBridgeManager @Inject constructor(
         started = false
         runCatching { locationManager.removeUpdates(listener) }
         runCatching { locationManager.removeNmeaListener(nmeaListener) }
+        runCatching { locationManager.unregisterGnssStatusCallback(gnssStatusCallback) }
+        usedPrns = emptyList()
         socket?.let { runCatching { it.close() } }
         socket = null
         scope.cancel()
@@ -208,7 +240,6 @@ class GpsBridgeManager @Inject constructor(
         val alt        = String.format(Locale.US, "%.1f", loc.altitude)
         val speedKnots = String.format(Locale.US, "%.1f", loc.speed * 1.94384f) // m/s -> knots
         val course     = String.format(Locale.US, "%.1f", loc.bearing)
-        val sats       = String.format(Locale.US, "%02d", loc.extras?.getInt("satellites") ?: 0)
         // Synthesised DOPs from Android's reported accuracy. gpsd's default
         // UERE is 5.1 m, so EPX = HDOP * UERE — pick HDOP = accuracy / 5.1
         // (clamped ≥ 0.5) so cgps's "2D Err" tracks Android's accuracy.
@@ -220,12 +251,23 @@ class GpsBridgeManager @Inject constructor(
         val hdop  = String.format(Locale.US, "%.1f", hdopV)
         val vdop  = String.format(Locale.US, "%.1f", vdopV)
         val pdop  = String.format(Locale.US, "%.1f", pdopV)
+        // Sat count for GGA: prefer GnssStatus's used-in-fix count when the
+        // callback has populated it, otherwise fall back to extras["satellites"]
+        // (which most fused-provider Locations leave as 0).
+        val satsCount = usedPrns.size.takeIf { it > 0 }
+            ?: (loc.extras?.getInt("satellites") ?: 0)
+        val sats = String.format(Locale.US, "%02d", satsCount)
         val gga = "GPGGA,$hms,$latStr,$ns,$lonStr,$ew,1,$sats,$hdop,$alt,M,0.0,M,,"
-        // GSA: A=auto-select mode, 3=3D fix (we shipped altitude in GGA), no
-        // satellite-ID list (Android doesn't expose it cleanly), then PDOP /
-        // HDOP / VDOP. With this gpsd reports a 3D fix and full DOPs instead
-        // of leaving PDOP/VDOP as n/a.
-        val gsa = "GPGSA,A,3,,,,,,,,,,,,,$pdop,$hdop,$vdop"
+        // GSA: A=auto-select, 3=3D fix (we shipped altitude in GGA), then 12
+        // PRN slots, then PDOP / HDOP / VDOP. The PRNs come from
+        // GnssStatus.Callback's usedInFix() snapshot — without them gpsd
+        // can't correlate $GPGSV positions into the fix and XDOP/YDOP/EPX/
+        // EPY stay n/a. Empty list → all slots blank (same behaviour as
+        // before; degrades gracefully on fused-only devices).
+        val prnSlots = (0 until 12).joinToString(",") {
+            usedPrns.getOrNull(it)?.toString().orEmpty()
+        }
+        val gsa = "GPGSA,A,3,$prnSlots,$pdop,$hdop,$vdop"
         // GST: pseudorange error stats. Fill the error-ellipse fields
         // (smjr / smnr / orient) AND the per-axis std lat/lon/alt — gpsd
         // computes EPX / EPY from the ellipse and falls back to std_lat /
@@ -243,6 +285,19 @@ class GpsBridgeManager @Inject constructor(
             append('$').append(gst).append('*').append(cksum(gst)).append("\r\n")
             append('$').append(rmc).append('*').append(cksum(rmc)).append("\r\n")
         }
+    }
+
+    /** Map an Android-reported (constellation, svid) pair to the PRN
+     *  numbering gpsd/cgps expect inside `$GxGSA` for multi-constellation
+     *  fixes. The offsets match what NMEA-emitting chipsets ship — visible
+     *  in the cgps "PRN" column (GLONASS 65+, Galileo 301+, BeiDou 401+). */
+    private fun toNmeaPrn(constellation: Int, svid: Int): Int = when (constellation) {
+        GnssStatus.CONSTELLATION_GLONASS -> svid + 64
+        GnssStatus.CONSTELLATION_GALILEO -> svid + 300
+        GnssStatus.CONSTELLATION_BEIDOU  -> svid + 400
+        GnssStatus.CONSTELLATION_QZSS    -> svid + 192
+        // GPS, SBAS, IRNSS, unknown — pass through.
+        else -> svid
     }
 
     private fun degToNmea(deg: Double, isLat: Boolean): Pair<String, Char> {
