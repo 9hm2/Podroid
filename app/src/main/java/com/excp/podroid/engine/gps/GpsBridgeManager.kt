@@ -146,24 +146,58 @@ class GpsBridgeManager @Inject constructor(
 
     // ── NMEA-0183 formatting ─────────────────────────────────────────────────
 
-    /** $GPGGA + $GPRMC sentence pair for one location fix. */
+    /** $GPGGA + $GPGSA + $GPGST + $GPRMC sentence quartet for one location
+     *  fix. GGA carries the position + HDOP; GSA carries fix mode and full
+     *  DOPs; GST carries pseudorange error stats so gpsd can populate
+     *  EPX / EPY / EPV from Android's accuracy estimates; RMC carries the
+     *  recommended-minimum data + speed/course/date.
+     *  All numeric formatting goes through Locale.US so the decimal
+     *  separator is a dot — NMEA-0183 mandates it, and gpsd silently drops
+     *  sentences with comma decimals (hu-HU et al. would emit commas
+     *  otherwise via the default Locale). */
     private fun formatNmea(loc: Location): String {
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = loc.time }
-        val hms = String.format(Locale.US, "%02d%02d%02d.00", 
+        val hms = String.format(Locale.US, "%02d%02d%02d.00",
             cal[Calendar.HOUR_OF_DAY], cal[Calendar.MINUTE], cal[Calendar.SECOND],
         )
-        val dmy = String.format(Locale.US, "%02d%02d%02d", 
+        val dmy = String.format(Locale.US, "%02d%02d%02d",
             cal[Calendar.DAY_OF_MONTH], cal[Calendar.MONTH] + 1, cal[Calendar.YEAR] % 100,
         )
         val (latStr, ns) = degToNmea(loc.latitude, true)
         val (lonStr, ew) = degToNmea(loc.longitude, false)
-        val alt = String.format(Locale.US, "%.1f", loc.altitude)
-        val speedKnots = String.format(Locale.US, "%.1f", loc.speed * 1.94384f) // m/s → knots
-        val course = String.format(Locale.US, "%.1f", loc.bearing)
-        val sats = String.format(Locale.US, "%02d", loc.extras?.getInt("satellites") ?: 0)
-        val gga = "GPGGA,$hms,$latStr,$ns,$lonStr,$ew,1,$sats,1.0,$alt,M,0.0,M,,"
+        val alt        = String.format(Locale.US, "%.1f", loc.altitude)
+        val speedKnots = String.format(Locale.US, "%.1f", loc.speed * 1.94384f) // m/s -> knots
+        val course     = String.format(Locale.US, "%.1f", loc.bearing)
+        val sats       = String.format(Locale.US, "%02d", loc.extras?.getInt("satellites") ?: 0)
+        // Synthesised DOPs from Android's reported accuracy. gpsd's default
+        // UERE is 5.1 m, so EPX = HDOP * UERE — pick HDOP = accuracy / 5.1
+        // (clamped ≥ 0.5) so cgps's "2D Err" tracks Android's accuracy.
+        val haccM = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 5.0
+        val vaccM = if (loc.hasVerticalAccuracy()) loc.verticalAccuracyMeters.toDouble() else haccM * 1.5
+        val hdopV = (haccM / 5.1).coerceAtLeast(0.5)
+        val vdopV = (vaccM / 5.1).coerceAtLeast(0.5)
+        val pdopV = kotlin.math.sqrt(hdopV * hdopV + vdopV * vdopV)
+        val hdop  = String.format(Locale.US, "%.1f", hdopV)
+        val vdop  = String.format(Locale.US, "%.1f", vdopV)
+        val pdop  = String.format(Locale.US, "%.1f", pdopV)
+        val gga = "GPGGA,$hms,$latStr,$ns,$lonStr,$ew,1,$sats,$hdop,$alt,M,0.0,M,,"
+        // GSA: A=auto-select mode, 3=3D fix (we shipped altitude in GGA), no
+        // satellite-ID list (Android doesn't expose it cleanly), then PDOP /
+        // HDOP / VDOP. With this gpsd reports a 3D fix and full DOPs instead
+        // of leaving PDOP/VDOP as n/a.
+        val gsa = "GPGSA,A,3,,,,,,,,,,,,,$pdop,$hdop,$vdop"
+        // GST: pseudorange error stats — std_lat / std_lon / std_alt (1σ in
+        // meters). Populates cgps's EPX / EPY / EPV directly from Android's
+        // accuracy estimates instead of leaving them n/a. Other fields
+        // (rms, error-ellipse axes) stay empty.
+        val gst = String.format(Locale.US, "GPGST,%s,,,,,%.1f,%.1f,%.1f", hms, haccM, haccM, vaccM)
         val rmc = "GPRMC,$hms,A,$latStr,$ns,$lonStr,$ew,$speedKnots,$course,$dmy,,"
-        return "\$$gga*${cksum(gga)}\r\n\$$rmc*${cksum(rmc)}\r\n"
+        return buildString {
+            append('$').append(gga).append('*').append(cksum(gga)).append("\r\n")
+            append('$').append(gsa).append('*').append(cksum(gsa)).append("\r\n")
+            append('$').append(gst).append('*').append(cksum(gst)).append("\r\n")
+            append('$').append(rmc).append('*').append(cksum(rmc)).append("\r\n")
+        }
     }
 
     private fun degToNmea(deg: Double, isLat: Boolean): Pair<String, Char> {
