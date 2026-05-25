@@ -58,6 +58,20 @@ BODY=$(
     fi
 )
 
+# Probe the endpoint first so connection failures produce a useful hint
+# instead of curl's terse "Failed to connect". The Android-side service
+# binds 127.0.0.1:8089; SLIRP exposes it as 10.0.2.2:8089 to the VM.
+if ! curl -sS -o /dev/null --connect-timeout 2 "${ENDPOINT%/v1/chat/completions}/health" 2>/dev/null; then
+    cat >&2 <<EOM
+podroid-ai: cannot reach the AI engine at $ENDPOINT
+  - Open the Podroid app on your phone → Settings → AI Engine
+  - Make sure a model is downloaded and the "Enable AI engine" toggle is ON
+  - If it shows "failed: rc=...", tap Export diagnostic log and check the
+    "=== AI Engine ===" section for the boot output
+EOM
+    exit 7
+fi
+
 # -N disables curl's output buffering so tokens stream in real-time.
 # Each SSE frame is "data: {...}"; we strip the prefix and pull the
 # delta.content field. Stop on the [DONE] sentinel.
