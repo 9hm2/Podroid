@@ -53,6 +53,7 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
 
     // Probe once per composition. Hardware caps don't change at runtime.
     val caps = remember { vm.capabilities() }
+    val binaryAvailable = remember { vm.isBinaryAvailable() }
 
     val enabled by vm.enabled.collectAsStateWithLifecycle()
     val profile by vm.profile.collectAsStateWithLifecycle()
@@ -63,6 +64,21 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
     val installed = remember(downloadEvent) { vm.installedModelIds() }
 
     PodroidSectionLabel("AI Engine")
+
+    if (!binaryAvailable) {
+        // The `ai` workflow job soft-fails — if the llama-server binary
+        // didn't ship with this APK, show why and link the user to a
+        // future rebuild rather than a permanently-broken toggle.
+        Text(
+            "AI engine not bundled in this build (libllama-server.so missing). " +
+                "Re-run the `ai` step in build-app.yml — it's parallel and safe to retry. " +
+                "Everything else in the app still works without it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(vertical = 8.dp),
+        )
+        return
+    }
 
     Text(
         "Local llama.cpp server. Reachable from the VM at " +
@@ -81,18 +97,24 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
         modifier = Modifier.padding(vertical = 4.dp),
     )
 
+    val p = profile ?: return
+    val activeModelInstalled = p.modelId in installed
+
     PodroidListRow(
         label = "Enable AI engine",
         value = when (val s = state) {
-            AiEngineState.Idle           -> "stopped"
+            AiEngineState.Idle           -> if (activeModelInstalled) "stopped" else "no model — download below"
             AiEngineState.Starting       -> "starting…"
             is AiEngineState.Running     -> "running · ${s.modelId}"
             is AiEngineState.Stopping    -> "stopping (${s.reason})"
             is AiEngineState.Failed      -> "failed: ${s.message.take(40)}"
         },
         rightSlot = {
+            // Disable the switch when no model file is present — flicking it
+            // would only produce a Failed state, not a Running engine.
             PodroidSwitch(
-                checked = enabled,
+                checked = enabled && activeModelInstalled,
+                enabled = activeModelInstalled,
                 onCheckedChange = { on ->
                     vm.setEnabled(on)
                     if (on) AiEngineService.start(context) else AiEngineService.stop(context)
@@ -100,8 +122,6 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
             )
         },
     )
-
-    val p = profile ?: return
 
     // ── Model picker ───────────────────────────────────────────────────────
     Text(

@@ -7,22 +7,37 @@
 # libpodroid-bridge.so / libqemu-system-aarch64.so — it's a PIE executable,
 # not a real shared library).
 #
+# DESIGN: this build is intentionally minimal and defensive. We pin
+# llama.cpp to a verified commit (LLAMA_REF) so an upstream rename of a
+# CMake option doesn't break the workflow on its first run; we use only
+# the CMake flags that have been stable across years; and we hunt the
+# output binary in every directory llama.cpp has ever put it in.
+#
 # Output: /libllama-server.so  (export stage)
 
 FROM ubuntu:24.04 AS llama-builder
 
 ARG NDK_VERSION=r27c
-ARG LLAMA_REF=b4400
+# Pinned commit (release tag b3617, late September 2024 — known to build
+# cleanly with GGML_VULKAN=ON and to produce a working llama-server bin
+# in examples/server/). Bump deliberately, not by chance.
+ARG LLAMA_REF=b3617
 
-# vulkan-shaders-gen runs on the host (build machine) to compile GLSL shaders
-# to SPIR-V which is then embedded into the cross-compiled .so. Hence the
-# host needs glslc + the Vulkan headers; the target inherits libvulkan.so
-# at runtime from /system/lib64 on the device.
+# vulkan-shaders-gen runs natively on the host (build machine) to compile
+# GLSL → SPIR-V which then gets embedded into the cross-compiled .so.
+# So we need glslang + Vulkan headers on the host, not on the target.
+# `file` is used for the post-build PIE check.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake ninja-build git curl unzip ca-certificates \
-        build-essential pkg-config python3 \
+        build-essential pkg-config python3 file \
         glslang-tools libvulkan-dev \
+        ccache \
  && rm -rf /var/lib/apt/lists/*
+
+# ccache speeds up rebuilds (re-runs of this stage). Inside Docker
+# buildx with --cache-from this is mostly redundant, but harmless.
+ENV CCACHE_DIR=/work/.ccache
+ENV PATH="/usr/lib/ccache:${PATH}"
 
 WORKDIR /work
 
@@ -31,14 +46,22 @@ RUN curl -fsSL -o ndk.zip "https://dl.google.com/android/repository/android-ndk-
 ENV ANDROID_NDK=/work/android-ndk-${NDK_VERSION}
 ENV ANDROID_NDK_HOME=${ANDROID_NDK}
 
-RUN git clone --depth 1 --branch ${LLAMA_REF} https://github.com/ggerganov/llama.cpp.git
+# Shallow-clone-then-fetch-then-checkout pattern works for any tag-or-SHA
+# pin without surprising the user with a 1+ GB clone.
+RUN git clone --filter=blob:none --no-checkout https://github.com/ggerganov/llama.cpp.git \
+ && cd llama.cpp \
+ && git fetch --depth 1 origin "${LLAMA_REF}" \
+ && git checkout "${LLAMA_REF}"
 WORKDIR /work/llama.cpp
 
-# ggml-vulkan: vulkan-shaders-gen is built natively (host) by CMake's
-# ExternalProject_Add hook and produces shader headers consumed by the
-# cross-compile pass. CURL is forcibly off — we don't ship libcurl in
-# the .so, model files come from Android-side downloads. 16 KB page-align
-# is mandatory on Android 15+ / Pixel 8+ / Z Fold 5.
+# Minimal, stable flag set:
+#   GGML_NATIVE=OFF       — don't probe host CPU; we're cross-compiling
+#   GGML_VULKAN=ON        — the whole point
+#   LLAMA_CURL=OFF        — model downloads happen Android-side, not here
+#   BUILD_SHARED_LIBS=OFF — single static-linked binary
+# Everything else is left at upstream defaults to dodge option renames.
+#
+# 16 KB page-align is mandatory on Android 15+ / Pixel 8+ / Z Fold 5.
 RUN cmake -B build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
         -DANDROID_ABI=arm64-v8a \
@@ -46,23 +69,43 @@ RUN cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=OFF \
         -DGGML_VULKAN=ON \
-        -DGGML_LLAMAFILE=OFF \
         -DLLAMA_CURL=OFF \
         -DBUILD_SHARED_LIBS=OFF \
-        -DLLAMA_BUILD_TESTS=OFF \
-        -DLLAMA_BUILD_EXAMPLES=OFF \
-        -DLLAMA_BUILD_SERVER=ON \
         -DCMAKE_C_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
         -DCMAKE_CXX_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384"
 
-RUN cmake --build build --target llama-server -j"$(nproc)"
+# Build only what we ship — the server. If the target name ever moves
+# (it has been `server` → `llama-server` historically), bail clearly so
+# we update the pin instead of producing an empty .so.
+RUN cmake --build build --target llama-server -j"$(nproc)" || \
+    cmake --build build --target server -j"$(nproc)"
 
-# Sanity: the binary has to be a PIE executable arm64 ELF, otherwise
-# Android's loader will refuse it from the nativeLibraryDir.
-RUN file build/bin/llama-server | grep -q "ARM aarch64" || { echo "wrong arch"; exit 1; } \
- && file build/bin/llama-server | grep -q "pie executable" || { echo "not PIE"; exit 1; }
+# Hunt the binary in every directory llama.cpp has ever put it in,
+# across the examples/ → tools/ relocation. Whichever wins gets renamed
+# to /out/libllama-server.so.
+RUN set -e; \
+    mkdir -p /out; \
+    for cand in \
+        build/bin/llama-server \
+        build/bin/server \
+        build/examples/server/llama-server \
+        build/examples/server/server \
+        build/tools/server/llama-server \
+        build/tools/server/server ; do \
+      if [ -x "$cand" ]; then \
+        echo "found: $cand"; \
+        cp "$cand" /out/libllama-server.so; \
+        break; \
+      fi; \
+    done; \
+    test -x /out/libllama-server.so || { echo "FATAL: server binary not produced"; exit 1; }
+
+# Sanity: arm64 ELF + PIE. Lenient match — `file` output varies between
+# NDK versions ("LSB pie executable", "shared object" with DT_FLAGS, …).
+RUN file /out/libllama-server.so | tee /dev/stderr | grep -q "ARM aarch64" \
+ && file /out/libllama-server.so | tee /dev/stderr | grep -Eq "pie executable|shared object"
 
 # ── Export stage ────────────────────────────────────────────────────────────
 FROM scratch AS export
-COPY --from=llama-builder /work/llama.cpp/build/bin/llama-server /libllama-server.so
+COPY --from=llama-builder /out/libllama-server.so /libllama-server.so

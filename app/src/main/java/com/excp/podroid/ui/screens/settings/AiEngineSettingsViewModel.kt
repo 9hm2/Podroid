@@ -8,6 +8,7 @@
  */
 package com.excp.podroid.ui.screens.settings
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.excp.podroid.ai.AiBackend
@@ -20,6 +21,8 @@ import com.excp.podroid.ai.LlamaServerProcess
 import com.excp.podroid.ai.ModelCatalogue
 import com.excp.podroid.ai.ModelManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,11 +35,20 @@ import javax.inject.Inject
 
 @HiltViewModel
 class AiEngineSettingsViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val repository: AiEngineRepository,
     private val detector: AiEngineDetector,
     private val modelManager: ModelManager,
     private val process: LlamaServerProcess,
 ) : ViewModel() {
+
+    /** True iff the cross-compiled llama-server binary actually shipped in
+     *  the APK's jniLibs. False on the (rare) first run where the `ai`
+     *  workflow job failed but the rest succeeded — we hide the engine
+     *  toggle entirely in that case so the user doesn't see a permanently
+     *  failing switch. */
+    fun isBinaryAvailable(): Boolean =
+        File(context.applicationInfo.nativeLibraryDir, "libllama-server.so").exists()
 
     val enabled: StateFlow<Boolean> = repository.enabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
