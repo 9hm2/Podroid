@@ -46,6 +46,17 @@ RUN curl -fsSL -o ndk.zip "https://dl.google.com/android/repository/android-ndk-
 ENV ANDROID_NDK=/work/android-ndk-${NDK_VERSION}
 ENV ANDROID_NDK_HOME=${ANDROID_NDK}
 
+# Vulkan-Hpp (Khronos C++ wrapper). The NDK ships vulkan.h but not the
+# matching vulkan.hpp, and Ubuntu's libvulkan-dev stopped bundling it
+# years ago. ggml-vulkan.cpp #include<vulkan/vulkan.hpp> would fail
+# without this. Clone shallow; only the *.hpp files at the repo root
+# are needed (vulkan.h comes from NDK sysroot at compile time).
+RUN git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Hpp.git /tmp/vulkan-hpp \
+ && mkdir -p /opt/vulkan-hpp-include/vulkan \
+ && cp -v /tmp/vulkan-hpp/vulkan/*.hpp /opt/vulkan-hpp-include/vulkan/ \
+ && test -f /opt/vulkan-hpp-include/vulkan/vulkan.hpp || { echo "FATAL: vulkan.hpp not staged"; exit 1; } \
+ && rm -rf /tmp/vulkan-hpp
+
 # Shallow-clone-then-fetch-then-checkout pattern works for any tag-or-SHA
 # pin without surprising the user with a 1+ GB clone.
 RUN git clone --filter=blob:none --no-checkout https://github.com/ggerganov/llama.cpp.git \
@@ -83,6 +94,7 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
     echo "=== Pass 1: host-native vulkan-shaders-gen ==="; \
     cmake -B build-host -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_FLAGS="-I/opt/vulkan-hpp-include" \
         -DGGML_NATIVE=OFF \
         -DGGML_VULKAN=ON \
         -DVulkan_GLSLC_EXECUTABLE="$GLSLC" \
@@ -102,7 +114,7 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
         -DLLAMA_CURL=OFF \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_C_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
-        -DCMAKE_CXX_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
+        -DCMAKE_CXX_FLAGS="-O3 -fPIE -I/opt/vulkan-hpp-include -Wl,-z,max-page-size=16384" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384"
 
 # Put pass 1's host-native shader generator on PATH for pass 2's build
