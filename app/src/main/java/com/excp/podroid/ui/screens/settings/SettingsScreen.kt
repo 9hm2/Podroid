@@ -1,6 +1,11 @@
 package com.excp.podroid.ui.screens.settings
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -322,12 +327,28 @@ fun SettingsScreen(
 
                     PodroidSectionLabel("GPS bridge")
                     val gpsBridge by viewModel.gpsBridgeEnabled.collectAsStateWithLifecycle()
+                    // Launches the system Location permission dialog when the
+                    // user flips the toggle ON without the grant; only flips
+                    // the setting on if/when the user grants it.
+                    val gpsPermLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.RequestPermission()
+                    ) { granted -> if (granted) viewModel.setGpsBridgeEnabled(true) }
                     PodroidListRow(
                         label = "Stream Android Location into the VM",
                         rightSlot = {
                             PodroidSwitch(
                                 checked = gpsBridge,
-                                onCheckedChange = { viewModel.setGpsBridgeEnabled(it) },
+                                onCheckedChange = { wantOn ->
+                                    if (!wantOn) {
+                                        viewModel.setGpsBridgeEnabled(false)
+                                    } else {
+                                        val granted = ContextCompat.checkSelfPermission(
+                                            ctx, Manifest.permission.ACCESS_FINE_LOCATION,
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                        if (granted) viewModel.setGpsBridgeEnabled(true)
+                                        else gpsPermLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                                    }
+                                },
                                 enabled = vmNotRunning,
                             )
                         },

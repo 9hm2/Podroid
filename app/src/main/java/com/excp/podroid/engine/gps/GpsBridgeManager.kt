@@ -41,6 +41,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.OutputStream
 import java.util.Calendar
+import java.util.Locale
 import java.util.TimeZone
 import javax.inject.Inject
 import kotlin.math.abs
@@ -148,18 +149,18 @@ class GpsBridgeManager @Inject constructor(
     /** $GPGGA + $GPRMC sentence pair for one location fix. */
     private fun formatNmea(loc: Location): String {
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = loc.time }
-        val hms = "%02d%02d%02d.00".format(
+        val hms = String.format(Locale.US, "%02d%02d%02d.00", 
             cal[Calendar.HOUR_OF_DAY], cal[Calendar.MINUTE], cal[Calendar.SECOND],
         )
-        val dmy = "%02d%02d%02d".format(
+        val dmy = String.format(Locale.US, "%02d%02d%02d", 
             cal[Calendar.DAY_OF_MONTH], cal[Calendar.MONTH] + 1, cal[Calendar.YEAR] % 100,
         )
         val (latStr, ns) = degToNmea(loc.latitude, true)
         val (lonStr, ew) = degToNmea(loc.longitude, false)
-        val alt = "%.1f".format(loc.altitude)
-        val speedKnots = "%.1f".format(loc.speed * 1.94384f) // m/s → knots
-        val course = "%.1f".format(loc.bearing)
-        val sats = "%02d".format(loc.extras?.getInt("satellites") ?: 0)
+        val alt = String.format(Locale.US, "%.1f", loc.altitude)
+        val speedKnots = String.format(Locale.US, "%.1f", loc.speed * 1.94384f) // m/s → knots
+        val course = String.format(Locale.US, "%.1f", loc.bearing)
+        val sats = String.format(Locale.US, "%02d", loc.extras?.getInt("satellites") ?: 0)
         val gga = "GPGGA,$hms,$latStr,$ns,$lonStr,$ew,1,$sats,1.0,$alt,M,0.0,M,,"
         val rmc = "GPRMC,$hms,A,$latStr,$ns,$lonStr,$ew,$speedKnots,$course,$dmy,,"
         return "\$$gga*${cksum(gga)}\r\n\$$rmc*${cksum(rmc)}\r\n"
@@ -171,14 +172,14 @@ class GpsBridgeManager @Inject constructor(
         val a = abs(deg)
         val d = a.toInt()
         val m = (a - d) * 60.0
-        val s = if (isLat) "%02d%07.4f".format(d, m) else "%03d%07.4f".format(d, m)
+        val s = if (isLat) String.format(Locale.US, "%02d%07.4f", d, m) else String.format(Locale.US, "%03d%07.4f", d, m)
         return s to hem
     }
 
     private fun cksum(body: String): String {
         var c = 0
         for (b in body.toByteArray()) c = c xor (b.toInt() and 0xFF)
-        return "%02X".format(c)
+        return String.format(Locale.US, "%02X", c)
     }
 
     companion object {
