@@ -18,10 +18,14 @@
 FROM ubuntu:24.04 AS llama-builder
 
 ARG NDK_VERSION=r27c
-# Pinned commit (release tag b3617, late September 2024 — known to build
-# cleanly with GGML_VULKAN=ON and to produce a working llama-server bin
-# in examples/server/). Bump deliberately, not by chance.
-ARG LLAMA_REF=b3617
+# Pinned commit (b4500, Dec 2024). Bumped from b3617 because the older
+# Vulkan compute pipeline made hard subgroup-size assumptions that the
+# Qualcomm Adreno driver rejects with VK_ERROR_UNKNOWN — every model
+# load failed on Z Fold 5 / SD 8 Gen 2. b4500 lands the mobile-GPU
+# subgroup-fallback path that makes Adreno 7xx work; it's also when
+# `--cache-reuse` arrived as a server option (re-add at that callsite
+# if you want prefix-cache speedups for chat workflows).
+ARG LLAMA_REF=b4500
 
 # vulkan-shaders-gen runs natively on the host (build machine) to compile
 # GLSL → SPIR-V which then gets embedded into the cross-compiled .so.
