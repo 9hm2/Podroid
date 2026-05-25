@@ -49,13 +49,32 @@ ENV ANDROID_NDK_HOME=${ANDROID_NDK}
 # Vulkan-Hpp (Khronos C++ wrapper). The NDK ships vulkan.h but not the
 # matching vulkan.hpp, and Ubuntu's libvulkan-dev stopped bundling it
 # years ago. ggml-vulkan.cpp #include<vulkan/vulkan.hpp> would fail
-# without this. Clone shallow; only the *.hpp files at the repo root
-# are needed (vulkan.h comes from NDK sysroot at compile time).
-RUN git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Hpp.git /tmp/vulkan-hpp \
- && mkdir -p /opt/vulkan-hpp-include/vulkan \
- && cp -v /tmp/vulkan-hpp/vulkan/*.hpp /opt/vulkan-hpp-include/vulkan/ \
- && test -f /opt/vulkan-hpp-include/vulkan/vulkan.hpp || { echo "FATAL: vulkan.hpp not staged"; exit 1; } \
- && rm -rf /tmp/vulkan-hpp
+# without this.
+#
+# Critical: vulkan.hpp asserts at compile time that VK_HEADER_VERSION
+# matches the .h it was generated against. NDK r27c ships v275, so we
+# clone Vulkan-Hpp at the tag that targets exactly that version. The
+# version is read from the NDK header so a future NDK bump just works.
+# Only the *.hpp files end up in /opt/vulkan-hpp-include — vulkan.h
+# itself stays the NDK sysroot's, since that's the ABI source of truth.
+RUN VK_VER=$(grep -E "^\s*#\s*define\s+VK_HEADER_VERSION\s+" \
+        "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/vulkan_core.h" \
+        | awk '{print $NF}'); \
+    test -n "$VK_VER" || { echo "FATAL: VK_HEADER_VERSION not found in NDK"; exit 1; }; \
+    echo "NDK Vulkan header version: 1.3.${VK_VER}"; \
+    cloned=0; \
+    for tag in "v1.3.${VK_VER}" "vulkan-sdk-1.3.${VK_VER}.0" "vulkan-sdk-1.3.${VK_VER}"; do \
+        echo "trying Vulkan-Hpp tag: $tag"; \
+        if git clone --depth 1 --branch "$tag" \
+                https://github.com/KhronosGroup/Vulkan-Hpp.git /tmp/vulkan-hpp 2>/dev/null; then \
+            cloned=1; echo "matched: $tag"; break; \
+        fi; \
+    done; \
+    test "$cloned" = "1" || { echo "FATAL: no matching Vulkan-Hpp tag for 1.3.${VK_VER}"; exit 1; }; \
+    mkdir -p /opt/vulkan-hpp-include/vulkan && \
+    cp -v /tmp/vulkan-hpp/vulkan/*.hpp /opt/vulkan-hpp-include/vulkan/ && \
+    test -f /opt/vulkan-hpp-include/vulkan/vulkan.hpp || { echo "FATAL: vulkan.hpp not staged"; exit 1; } && \
+    rm -rf /tmp/vulkan-hpp
 
 # Shallow-clone-then-fetch-then-checkout pattern works for any tag-or-SHA
 # pin without surprising the user with a 1+ GB clone.
