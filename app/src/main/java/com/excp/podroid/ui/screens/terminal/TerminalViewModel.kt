@@ -762,15 +762,19 @@ class TerminalViewModel @Inject constructor(
             "CTRL" -> { extraCtrl = !extraCtrl; return }
             "ALT"  -> { extraAlt = !extraAlt; return }
         }
+        // Route through currentSession (not the cached tab-0 `session` field)
+        // so multi-tab extra-key presses land in whichever tab is on screen.
+        val target = currentSession ?: return
+        val emu = target.emulator
         val bytes = when (key) {
             "ESC"  -> byteArrayOf(27)
             "TAB"  -> byteArrayOf(9)
-            "UP"   -> if (isDecsetSet(session?.emulator, 1)) "\u001bOA".toByteArray() else "\u001b[A".toByteArray()
-            "DOWN" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOB".toByteArray() else "\u001b[B".toByteArray()
-            "LEFT" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOD".toByteArray() else "\u001b[D".toByteArray()
-            "RIGHT"-> if (isDecsetSet(session?.emulator, 1)) "\u001bOC".toByteArray() else "\u001b[C".toByteArray()
-            "HOME" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOH".toByteArray() else "\u001b[H".toByteArray()
-            "END"  -> if (isDecsetSet(session?.emulator, 1)) "\u001bOF".toByteArray() else "\u001b[F".toByteArray()
+            "UP"   -> if (isDecsetSet(emu, 1)) "\u001bOA".toByteArray() else "\u001b[A".toByteArray()
+            "DOWN" -> if (isDecsetSet(emu, 1)) "\u001bOB".toByteArray() else "\u001b[B".toByteArray()
+            "LEFT" -> if (isDecsetSet(emu, 1)) "\u001bOD".toByteArray() else "\u001b[D".toByteArray()
+            "RIGHT"-> if (isDecsetSet(emu, 1)) "\u001bOC".toByteArray() else "\u001b[C".toByteArray()
+            "HOME" -> if (isDecsetSet(emu, 1)) "\u001bOH".toByteArray() else "\u001b[H".toByteArray()
+            "END"  -> if (isDecsetSet(emu, 1)) "\u001bOF".toByteArray() else "\u001b[F".toByteArray()
             "PGUP" -> "\u001b[5~".toByteArray()
             "PGDN" -> "\u001b[6~".toByteArray()
             "F1"   -> "\u001bOP".toByteArray()
@@ -790,7 +794,7 @@ class TerminalViewModel @Inject constructor(
             "/"    -> "/".toByteArray()
             else   -> return
         }
-        session?.write(bytes, 0, bytes.size)
+        target.write(bytes, 0, bytes.size)
         extraCtrl = false
         extraAlt = false
     }
