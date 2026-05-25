@@ -824,6 +824,18 @@ class TerminalViewModel @Inject constructor(
         viewModelScope.launch { customCommandsRepository.add(name.trim(), command.trim(), openNewTab) }
     }
 
+    fun updateCustomCommand(cc: com.excp.podroid.data.repository.CustomCommand) {
+        if (cc.name.isBlank() || cc.command.isBlank()) return
+        viewModelScope.launch {
+            customCommandsRepository.update(cc.copy(name = cc.name.trim(), command = cc.command.trim()))
+        }
+    }
+
+    /** direction = -1 for up, +1 for down; no-op at the list edges. */
+    fun moveCustomCommand(id: String, direction: Int) {
+        viewModelScope.launch { customCommandsRepository.move(id, direction) }
+    }
+
     fun removeCustomCommand(id: String) {
         viewModelScope.launch { customCommandsRepository.remove(id) }
     }
