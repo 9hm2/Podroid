@@ -124,8 +124,19 @@ class LlamaServerProcess @Inject constructor(
             val rc = p.waitFor()
             // If we asked it to stop, state is already Stopping/Idle.
             if (_state.value is AiEngineState.Running) {
-                _state.value = if (rc == 0) AiEngineState.Idle
-                else AiEngineState.Failed("llama-server exited rc=$rc — see logs")
+                _state.value = if (rc == 0) {
+                    AiEngineState.Idle
+                } else {
+                    // Pull the last non-blank log line — that's almost always the
+                    // root error ("unknown argument: --foo", "failed to load model",
+                    // "could not bind to port"). Surfaces in the Settings status
+                    // pill so the user doesn't need to export diagnostics first.
+                    val tail = runCatching {
+                        logFile.readLines().lastOrNull { it.isNotBlank() }
+                    }.getOrNull().orEmpty()
+                    val suffix = if (tail.isNotBlank()) " — ${tail.take(160)}" else " — see logs"
+                    AiEngineState.Failed("llama-server exited rc=$rc$suffix")
+                }
             }
         } catch (_: InterruptedException) {
             // scope cancellation — ignored
@@ -172,9 +183,9 @@ class LlamaServerProcess @Inject constructor(
         // and quiet logging so the file doesn't balloon.
         add("--alias"); add("podroid")
         add("--log-disable")  // keep llama-server's own verbose logs off; ours capture stdout.
-        // Cache-prompt enables prefix-cache reuse — big speedup on chat-y
-        // workflows where each turn shares the prior conversation.
-        add("--cache-reuse"); add("256")
+        // (--cache-reuse was a useful prefix-cache reuse hint here, but it's
+        // a b4350+ option — current pin b3617 doesn't recognise it and
+        // dumps its full help + exits rc=1. Re-add when LLAMA_REF moves.)
     }
 
     /** Cooperative shutdown helper for app exit. */
