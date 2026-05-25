@@ -66,10 +66,31 @@ WORKDIR /work/llama.cpp
 # we point CMake at the NDK's bundled glslc. Path varies between NDK
 # versions (shader-tools/ vs toolchains/), so probe at build time.
 #
+# Two-pass build to dodge a classic cross-compile foot-gun:
+#  Pass 1 (host x86_64): compile vulkan-shaders-gen natively. This tool
+#         shells GLSL→SPIR-V via glslc; SPIR-V is target-independent so
+#         the host-built tool produces shaders the arm64 .so embeds.
+#  Pass 2 (arm64 cross): build everything else. The "generate vulkan
+#         shaders" custom command shells `vulkan-shaders-gen` by bare
+#         name — we put pass 1's host binary on PATH so that shell
+#         lookup succeeds instead of trying to exec the arm64 binary
+#         CMake also (uselessly) builds in pass 2's bin/.
+#
 # 16 KB page-align is mandatory on Android 15+ / Pixel 8+ / Z Fold 5.
 RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | head -1); \
     test -n "$GLSLC" || { echo "FATAL: glslc not found anywhere in $ANDROID_NDK"; exit 1; }; \
     echo "using glslc: $GLSLC"; \
+    echo "=== Pass 1: host-native vulkan-shaders-gen ==="; \
+    cmake -B build-host -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_NATIVE=OFF \
+        -DGGML_VULKAN=ON \
+        -DVulkan_GLSLC_EXECUTABLE="$GLSLC" \
+        -DLLAMA_CURL=OFF \
+        -DBUILD_SHARED_LIBS=OFF && \
+    cmake --build build-host --target vulkan-shaders-gen -j"$(nproc)" && \
+    test -x build-host/bin/vulkan-shaders-gen || { echo "FATAL: host vulkan-shaders-gen not built"; exit 1; }; \
+    echo "=== Pass 2: Android arm64 cross-compile ==="; \
     cmake -B build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
         -DANDROID_ABI=arm64-v8a \
@@ -83,6 +104,10 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
         -DCMAKE_C_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
         -DCMAKE_CXX_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384"
+
+# Put pass 1's host-native shader generator on PATH for pass 2's build
+# step, where the `Generate vulkan shaders` rule invokes it by bare name.
+ENV PATH="/work/llama.cpp/build-host/bin:${PATH}"
 
 # Build only what we ship — the server. If the target name ever moves
 # (it has been `server` → `llama-server` historically), bail clearly so
