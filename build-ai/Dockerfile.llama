@@ -61,14 +61,23 @@ WORKDIR /work/llama.cpp
 #   BUILD_SHARED_LIBS=OFF — single static-linked binary
 # Everything else is left at upstream defaults to dodge option renames.
 #
+# CMake's FindVulkan demands `glslc` (Google's shader compiler from
+# shaderc). Ubuntu's `glslang-tools` only provides glslangValidator, so
+# we point CMake at the NDK's bundled glslc. Path varies between NDK
+# versions (shader-tools/ vs toolchains/), so probe at build time.
+#
 # 16 KB page-align is mandatory on Android 15+ / Pixel 8+ / Z Fold 5.
-RUN cmake -B build -G Ninja \
+RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | head -1); \
+    test -n "$GLSLC" || { echo "FATAL: glslc not found anywhere in $ANDROID_NDK"; exit 1; }; \
+    echo "using glslc: $GLSLC"; \
+    cmake -B build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
         -DANDROID_ABI=arm64-v8a \
         -DANDROID_PLATFORM=android-28 \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=OFF \
         -DGGML_VULKAN=ON \
+        -DVulkan_GLSLC_EXECUTABLE="$GLSLC" \
         -DLLAMA_CURL=OFF \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_C_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \

@@ -24,7 +24,10 @@ RUN cd /work/vsock-agent && make CC=gcc
 FROM debian:bookworm AS builder
 
 ARG KALI_SUITE=kali-rolling
-ARG KALI_MIRROR=http://http.kali.org/kali
+# kali.download is the official CloudFront-backed CDN. Far more reliable
+# under CI load than the round-robin http.kali.org pool, which has been
+# flaking on GitHub runners with intermittent 504s on libc6 / libstdc++6.
+ARG KALI_MIRROR=http://kali.download/kali
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         debootstrap qemu-user-static binfmt-support \
@@ -47,11 +50,26 @@ RUN wget -qO kali-key.asc https://archive.kali.org/archive-key.asc \
 #   openssh-server, sudo   : remote shell + privilege
 #   net + wireless core    : minimum for passed-through USB Wi-Fi auditing
 #   tigervnc + pulseaudio  : the in-app X11 viewer (desktop env via runtime apt)
-RUN debootstrap --arch=arm64 --foreign --variant=minbase \
-        --keyring=/work/kali-archive-keyring.gpg \
-        --components=main,contrib,non-free,non-free-firmware \
-        --include=systemd-sysv,udev,dbus,libpam-systemd,kali-archive-keyring,ca-certificates,openssh-server,sudo,iproute2,iputils-ping,net-tools,isc-dhcp-client,iw,wireless-tools,rfkill,wpasupplicant,aircrack-ng,usbutils,pciutils,kmod,bash-completion,less,nano,tmux,screen,gpsd,tigervnc-standalone-server,tigervnc-common,pulseaudio,pulseaudio-utils,curl,jq \
-        ${KALI_SUITE} /work/rootfs ${KALI_MIRROR}
+# Retry loop because the Kali mirror occasionally drops a single package
+# fetch (HTTP 504 on transient packages like libatomic1 / gcc-base) and
+# debootstrap exits with a partial /work/rootfs. Up to 3 attempts with
+# escalating waits — each attempt re-fetches the whole set from scratch.
+RUN set -e; \
+    for attempt in 1 2 3; do \
+        echo "=== debootstrap attempt $attempt ==="; \
+        rm -rf /work/rootfs; \
+        if debootstrap --arch=arm64 --foreign --variant=minbase \
+                --keyring=/work/kali-archive-keyring.gpg \
+                --components=main,contrib,non-free,non-free-firmware \
+                --include=systemd-sysv,udev,dbus,libpam-systemd,kali-archive-keyring,ca-certificates,openssh-server,sudo,iproute2,iputils-ping,net-tools,isc-dhcp-client,iw,wireless-tools,rfkill,wpasupplicant,aircrack-ng,usbutils,pciutils,kmod,bash-completion,less,nano,tmux,screen,gpsd,tigervnc-standalone-server,tigervnc-common,pulseaudio,pulseaudio-utils,curl,jq \
+                ${KALI_SUITE} /work/rootfs ${KALI_MIRROR}; then \
+            echo "=== debootstrap succeeded on attempt $attempt ==="; \
+            break; \
+        fi; \
+        echo "=== attempt $attempt failed; sleeping $((attempt * 10))s ==="; \
+        sleep $((attempt * 10)); \
+        [ "$attempt" = "3" ] && { echo "FATAL: debootstrap failed 3×"; exit 1; }; \
+    done
 RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
  && chroot /work/rootfs /debootstrap/debootstrap --second-stage
 
