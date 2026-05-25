@@ -23,8 +23,10 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.location.OnNmeaMessageListener
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
+import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -62,6 +64,15 @@ class GpsBridgeManager @Inject constructor(
     @Volatile private var started = false
     @Volatile private var socket: LocalSocket? = null
     private val listener = LocationListener { loc -> scope.launch { writeFix(loc) } }
+    // Raw NMEA from the chip itself — multi-constellation (GP/GL/GA/GB) with
+    // real DOPs, true satellite list, and per-axis error stats. We forward
+    // these straight to gpsd alongside our synthesised sentences; gpsd uses
+    // whichever talker arrives first per cycle, and the chip's data wins on
+    // accuracy. Falls back gracefully when the chip stays silent (network /
+    // fused provider) — in that case the synthesised quartet is all gpsd sees.
+    private val nmeaListener = OnNmeaMessageListener { msg, _ ->
+        scope.launch { writeNmeaLine(msg) }
+    }
 
     // Only backends that expose a GPS channel (QEMU; nullable on AVF) yield a
     // path. When null the bridge stays inactive — same code path as "VM not up".
@@ -90,6 +101,13 @@ class GpsBridgeManager @Inject constructor(
             locationManager.requestLocationUpdates(
                 provider, 1000L, 0f, listener, Looper.getMainLooper(),
             )
+            // addNmeaListener has its own permission check (FINE) — we already
+            // gated above. Quietly ignored if the chip emits no NMEA (network
+            // / passive providers, fused-only devices); the synthesised quartet
+            // remains as the fallback.
+            runCatching {
+                locationManager.addNmeaListener(nmeaListener, Handler(Looper.getMainLooper()))
+            }.onFailure { e -> Log.d(TAG, "addNmeaListener unavailable: ${e.message}") }
         } catch (se: SecurityException) {
             Log.w(TAG, "requestLocationUpdates denied: ${se.message}")
             started = false
@@ -100,6 +118,7 @@ class GpsBridgeManager @Inject constructor(
         if (!started) return
         started = false
         runCatching { locationManager.removeUpdates(listener) }
+        runCatching { locationManager.removeNmeaListener(nmeaListener) }
         socket?.let { runCatching { it.close() } }
         socket = null
         scope.cancel()
@@ -139,6 +158,27 @@ class GpsBridgeManager @Inject constructor(
         }.onFailure {
             // QEMU likely tore the chardev down (VM stop). Drop the socket so the
             // next fix reconnects when the VM comes back.
+            runCatching { socket?.close() }
+            socket = null
+        }
+    }
+
+    /** Forward a raw NMEA sentence from the chip straight to gpsd. Android
+     *  delivers each sentence with its own checksum already attached, but
+     *  not always with CRLF — normalise the line ending so gpsd's line
+     *  parser keeps sync. */
+    private suspend fun writeNmeaLine(line: String) = writeMutex.withLock {
+        val out: OutputStream = socket?.outputStream ?: run {
+            connectSocket()
+            socket?.outputStream ?: return@withLock
+        }
+        val normalised = if (line.endsWith("\r\n")) line
+                         else if (line.endsWith("\n")) line.dropLast(1) + "\r\n"
+                         else "$line\r\n"
+        runCatching {
+            out.write(normalised.toByteArray())
+            out.flush()
+        }.onFailure {
             runCatching { socket?.close() }
             socket = null
         }
@@ -186,11 +226,16 @@ class GpsBridgeManager @Inject constructor(
         // HDOP / VDOP. With this gpsd reports a 3D fix and full DOPs instead
         // of leaving PDOP/VDOP as n/a.
         val gsa = "GPGSA,A,3,,,,,,,,,,,,,$pdop,$hdop,$vdop"
-        // GST: pseudorange error stats — std_lat / std_lon / std_alt (1σ in
-        // meters). Populates cgps's EPX / EPY / EPV directly from Android's
-        // accuracy estimates instead of leaving them n/a. Other fields
-        // (rms, error-ellipse axes) stay empty.
-        val gst = String.format(Locale.US, "GPGST,%s,,,,,%.1f,%.1f,%.1f", hms, haccM, haccM, vaccM)
+        // GST: pseudorange error stats. Fill the error-ellipse fields
+        // (smjr / smnr / orient) AND the per-axis std lat/lon/alt — gpsd
+        // computes EPX / EPY from the ellipse and falls back to std_lat /
+        // std_lon only when the ellipse is missing. Treat the error as a
+        // circular Gaussian: semi-major = semi-minor = horizontal accuracy,
+        // orientation 0°. That populates EPX, EPY and EPV consistently.
+        val gst = String.format(
+            Locale.US, "GPGST,%s,,%.1f,%.1f,0.0,%.1f,%.1f,%.1f",
+            hms, haccM, haccM, haccM, haccM, vaccM,
+        )
         val rmc = "GPRMC,$hms,A,$latStr,$ns,$lonStr,$ew,$speedKnots,$course,$dmy,,"
         return buildString {
             append('$').append(gga).append('*').append(cksum(gga)).append("\r\n")
