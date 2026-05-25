@@ -36,6 +36,7 @@ Commands:
   initramfs     Build custom kernel + Alpine VM initramfs (vmlinuz + initrd)
   rootfs        Build Alpine rootfs squashfs (alpine-rootfs.squashfs)
   qemu          Build QEMU + podroid-bridge + podroid-launcher
+  ai            Build llama.cpp llama-server (Vulkan + CPU/NEON) for Android arm64
   apk           Build the Android APK (also builds libtermux.so via Gradle NDK)
   deploy        Build APK, uninstall old version, and install to device
   test          Perform full build, install, and automated boot validation
@@ -154,6 +155,19 @@ build_qemu() {
     success "QEMU and bridge ready."
 }
 
+build_ai() {
+    log "Building llama.cpp llama-server (Vulkan + CPU/NEON) for Android arm64..."
+    mkdir -p "$JNILIBS"
+    docker buildx build --network=host \
+        -f "${SCRIPT_DIR}/build-ai/Dockerfile.llama" \
+        --output "type=local,dest=$JNILIBS" \
+        --target export \
+        "${SCRIPT_DIR}/build-ai/"
+    [ -f "$JNILIBS/libllama-server.so" ] || error "llama-server build did not produce libllama-server.so"
+    verify_16kb_align "$JNILIBS/libllama-server.so"
+    success "AI engine ready: $(du -h "$JNILIBS/libllama-server.so" | cut -f1)"
+}
+
 build_apk() {
     log "Building APK via Gradle..."
     ./gradlew assembleDebug
@@ -247,6 +261,7 @@ case "$1" in
     initramfs) build_initramfs ;;
     rootfs)    build_rootfs ;;
     qemu)      build_qemu ;;
+    ai)        build_ai ;;
     apk)       build_apk ;;
     deploy)    build_apk && deploy_apk ;;
     test)      run_boot_test ;;
@@ -254,6 +269,7 @@ case "$1" in
         build_initramfs
         build_rootfs
         build_qemu
+        build_ai
         build_apk
         ;;
     clean)

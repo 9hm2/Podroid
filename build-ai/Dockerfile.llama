@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+#
+# Cross-compile llama.cpp's llama-server for Android arm64 with Vulkan +
+# CPU/NEON backends. The resulting binary is renamed to libllama-server.so
+# so Android's automatic jniLibs extractor lays it down under
+# applicationInfo.nativeLibraryDir at install time (same trick as
+# libpodroid-bridge.so / libqemu-system-aarch64.so — it's a PIE executable,
+# not a real shared library).
+#
+# Output: /libllama-server.so  (export stage)
+
+FROM ubuntu:24.04 AS llama-builder
+
+ARG NDK_VERSION=r27c
+ARG LLAMA_REF=b4400
+
+# vulkan-shaders-gen runs on the host (build machine) to compile GLSL shaders
+# to SPIR-V which is then embedded into the cross-compiled .so. Hence the
+# host needs glslc + the Vulkan headers; the target inherits libvulkan.so
+# at runtime from /system/lib64 on the device.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake ninja-build git curl unzip ca-certificates \
+        build-essential pkg-config python3 \
+        glslang-tools libvulkan-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+RUN curl -fsSL -o ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" \
+ && unzip -q ndk.zip && rm ndk.zip
+ENV ANDROID_NDK=/work/android-ndk-${NDK_VERSION}
+ENV ANDROID_NDK_HOME=${ANDROID_NDK}
+
+RUN git clone --depth 1 --branch ${LLAMA_REF} https://github.com/ggerganov/llama.cpp.git
+WORKDIR /work/llama.cpp
+
+# ggml-vulkan: vulkan-shaders-gen is built natively (host) by CMake's
+# ExternalProject_Add hook and produces shader headers consumed by the
+# cross-compile pass. CURL is forcibly off — we don't ship libcurl in
+# the .so, model files come from Android-side downloads. 16 KB page-align
+# is mandatory on Android 15+ / Pixel 8+ / Z Fold 5.
+RUN cmake -B build -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
+        -DANDROID_ABI=arm64-v8a \
+        -DANDROID_PLATFORM=android-28 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_NATIVE=OFF \
+        -DGGML_VULKAN=ON \
+        -DGGML_LLAMAFILE=OFF \
+        -DLLAMA_CURL=OFF \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DLLAMA_BUILD_TESTS=OFF \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_SERVER=ON \
+        -DCMAKE_C_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
+        -DCMAKE_CXX_FLAGS="-O3 -fPIE -Wl,-z,max-page-size=16384" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384"
+
+RUN cmake --build build --target llama-server -j"$(nproc)"
+
+# Sanity: the binary has to be a PIE executable arm64 ELF, otherwise
+# Android's loader will refuse it from the nativeLibraryDir.
+RUN file build/bin/llama-server | grep -q "ARM aarch64" || { echo "wrong arch"; exit 1; } \
+ && file build/bin/llama-server | grep -q "pie executable" || { echo "not PIE"; exit 1; }
+
+# ── Export stage ────────────────────────────────────────────────────────────
+FROM scratch AS export
+COPY --from=llama-builder /work/llama.cpp/build/bin/llama-server /libllama-server.so

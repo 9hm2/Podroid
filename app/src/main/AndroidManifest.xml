@@ -119,6 +119,21 @@
                 android:value="Podman emulation via QEMU" />
         </service>
 
+        <!--
+            AI engine foreground service — owns the llama-server subprocess
+            (libllama-server.so from jniLibs). Independent lifecycle from the
+            VM service; the VM consumes the engine over SLIRP loopback when
+            the toggle is on. Same special-use subtype model as PodroidService.
+        -->
+        <service
+            android:name=".ai.AiEngineService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="On-device LLM inference (llama.cpp)" />
+        </service>
+
     </application>
 
 </manifest>

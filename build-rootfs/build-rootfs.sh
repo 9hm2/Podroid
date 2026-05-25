@@ -129,7 +129,12 @@ RDY
 # --- resize daemon + winsize-restoring login wrapper (reused as-is) ---------
 cp /work/files/usr/local/bin/podroid-resize "$ROOTFS/usr/local/sbin/podroid-resize"
 cp /work/files/usr/local/bin/podroid-login  "$ROOTFS/usr/local/bin/podroid-login"
-chmod +x "$ROOTFS/usr/local/sbin/podroid-"* "$ROOTFS/usr/local/bin/podroid-login"
+# podroid-ai: VM-side curl wrapper that hits the Android llama-server over
+# SLIRP loopback (10.0.2.2). Depends on curl + jq (in --include).
+cp /work/files/usr/local/bin/podroid-ai     "$ROOTFS/usr/local/bin/podroid-ai"
+chmod +x "$ROOTFS/usr/local/sbin/podroid-"* \
+         "$ROOTFS/usr/local/bin/podroid-login" \
+         "$ROOTFS/usr/local/bin/podroid-ai"
 
 # --- systemd units ----------------------------------------------------------
 cat > "$ROOTFS/etc/systemd/system/podroid-bootstrap.service" <<'EOF'
