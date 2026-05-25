@@ -92,6 +92,10 @@ WORKDIR /work/llama.cpp
 # Minimal, stable flag set:
 #   GGML_NATIVE=OFF       — don't probe host CPU; we're cross-compiling
 #   GGML_VULKAN=ON        — the whole point
+#   GGML_OPENMP=OFF       — Android doesn't ship libomp.so in /system/lib64,
+#                           so a libomp-linked binary exits rc=1 the moment
+#                           the bionic loader tries to resolve it. llama.cpp
+#                           falls back to std::thread pools (same perf).
 #   LLAMA_CURL=OFF        — model downloads happen Android-side, not here
 #   BUILD_SHARED_LIBS=OFF — single static-linked binary
 # Everything else is left at upstream defaults to dodge option renames.
@@ -121,6 +125,7 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
         -DCMAKE_CXX_FLAGS="-I/opt/vulkan-hpp-include" \
         -DGGML_NATIVE=OFF \
         -DGGML_VULKAN=ON \
+        -DGGML_OPENMP=OFF \
         -DVulkan_GLSLC_EXECUTABLE="$GLSLC" \
         -DLLAMA_CURL=OFF \
         -DBUILD_SHARED_LIBS=OFF && \
@@ -134,6 +139,7 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=OFF \
         -DGGML_VULKAN=ON \
+        -DGGML_OPENMP=OFF \
         -DVulkan_GLSLC_EXECUTABLE="$GLSLC" \
         -DLLAMA_CURL=OFF \
         -DBUILD_SHARED_LIBS=OFF \
