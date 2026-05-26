@@ -31,7 +31,7 @@ A real Alpine VM, a real Linux kernel, rootless Podman, and an in-app X11 viewer
 ## What it is
 
 - Boots a standard **Alpine 3.23** VM under QEMU on stock Android 9+.
-- Custom **Linux 7.0.5** kernel: every container option (overlayfs, netfilter, bridge, FUSE, binfmt_misc) compiled `=y`. Build fails if any get demoted.
+- Custom **Linux 7.0.10** kernel: every container option (overlayfs, netfilter, bridge, FUSE, binfmt_misc) compiled `=y`. Build fails if any get demoted.
 - Rootless **Podman, Docker and LXC** pre-installed and pre-wired.
 - In-app **X11 viewer** (Xvnc + PulseAudio) with touch→mouse and audio.
 - No root, no userland tarballs. The default QEMU path needs no ADB; AVF acceleration on pKVM phones takes one ADB grant on first install.
@@ -79,7 +79,7 @@ Default login: **root / podroid**.
 
 ## Features
 
-- **Linux 7.0.5 kernel**, custom-built. Every container option compiled `=y`; the build fails if any get demoted.
+- **Linux 7.0.10 kernel**, custom-built. Every container option compiled `=y`; the build fails if any get demoted.
 - **Podman, Docker and LXC pre-installed.** Rootless Podman wired up with crun + netavark + slirp4netns; `rc-service docker start` runs the Docker daemon, and `lxc-create -t download` pulls full distro containers (Alpine, Ubuntu, Debian, …) out of the box.
 - **OpenRC as PID 1.** `apk add` whatever you want, `rc-service ... start`, and it persists across reboots.
 - **In-app X11 viewer** (Xvnc + PulseAudio): live-resizable display (match-device, or 720p–1440p / custom presets), direct-touch and trackpad pointer modes with scroll, fullscreen, rotation lock, external-keyboard and mouse-wheel support, soft-keyboard input, and PCM audio over loopback.
