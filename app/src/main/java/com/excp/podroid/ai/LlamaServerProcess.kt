@@ -172,7 +172,10 @@ class LlamaServerProcess @Inject constructor(
         // sensibly since v0.3). Otherwise honour the user explicit value.
         if (profile.threads > 0) { add("-t"); add(profile.threads.toString()) }
 
-        if (profile.flashAttention) add("-fa")
+        // -fa changed from flag-only to "--flash-attn <on|off|auto>" in b6000+.
+        // Always pass the value explicitly so the parser doesn't greedily
+        // consume the next arg (-ctk) as the value.
+        add("-fa"); add(if (profile.flashAttention) "on" else "off")
         add("-ctk"); add(profile.kvCacheType.id)
         add("-ctv"); add(profile.kvCacheType.id)
         add("-b"); add(profile.batchSize.toString())
