@@ -234,8 +234,17 @@ install_aider() {
     rm -rf "$PIPX_HOME/venvs/aider-chat" 2>/dev/null
     rm -rf /root/.local/share/pipx/venvs/aider-chat 2>/dev/null
     rm -f /usr/local/bin/aider 2>/dev/null
-    log "Installing Aider via uv (pre-built wheels, ~50 MB)"
-    uv tool install aider-chat
+    # aider-chat pins numpy<2 (transitive through litellm + friends),
+    # which forces numpy 1.26.x. That release line has NO pre-built
+    # wheel for Python 3.13 (only 3.10-3.12) — uv would otherwise
+    # fall back to compiling numpy from source, which needs gcc/clang
+    # the rootfs doesn't have and Kali's apt currently can't supply
+    # (gcc-16 transitive deps 404 mid-sync). --python 3.12 makes uv
+    # download a standalone pre-built Python 3.12 and use *that* for
+    # the install: numpy 1.26 wheel is available there, zero compilers
+    # involved.
+    log "Installing Aider via uv with Python 3.12 (pre-built wheels, ~50 MB)"
+    uv tool install --python 3.12 aider-chat
     command -v aider >/dev/null 2>&1 && ok "aider installed: $(aider --version 2>/dev/null | head -1)"
 }
 
@@ -248,8 +257,11 @@ install_sgpt() {
     rm -rf "$PIPX_HOME/venvs/shell-gpt" 2>/dev/null
     rm -rf /root/.local/share/pipx/venvs/shell-gpt 2>/dev/null
     rm -f /usr/local/bin/sgpt 2>/dev/null
-    log "Installing shell-gpt via uv (~10 MB)"
-    uv tool install shell-gpt
+    # shell-gpt has no numpy dep so the host Python is fine, but
+    # pinning the same 3.12 keeps uv's Python cache shared with aider —
+    # a single ~30 MB download serves both tools.
+    log "Installing shell-gpt via uv with Python 3.12 (~10 MB)"
+    uv tool install --python 3.12 shell-gpt
     # shell-gpt's first run writes ~/.config/shell_gpt/.sgptrc — pre-seed
     # it so the user doesn't get prompted for an OpenAI key on a wholly
     # local install. Different per-home; touch root + existing humans.
