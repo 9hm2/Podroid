@@ -132,9 +132,15 @@ cp /work/files/usr/local/bin/podroid-login  "$ROOTFS/usr/local/bin/podroid-login
 # podroid-ai: VM-side curl wrapper that hits the Android llama-server over
 # SLIRP loopback (10.0.2.2). Depends on curl + jq (in --include).
 cp /work/files/usr/local/bin/podroid-ai     "$ROOTFS/usr/local/bin/podroid-ai"
+# podroid-install-ai: idempotent installer for Aider + shell-gpt; the user
+# runs it once with `sudo podroid-install-ai` after the engine is up. Not
+# auto-run at first boot — that would slow boot + need network at first
+# login; an explicit `sudo` keeps the failure mode obvious.
+cp /work/files/usr/local/bin/podroid-install-ai "$ROOTFS/usr/local/bin/podroid-install-ai"
 chmod +x "$ROOTFS/usr/local/sbin/podroid-"* \
          "$ROOTFS/usr/local/bin/podroid-login" \
-         "$ROOTFS/usr/local/bin/podroid-ai"
+         "$ROOTFS/usr/local/bin/podroid-ai" \
+         "$ROOTFS/usr/local/bin/podroid-install-ai"
 
 # --- systemd units ----------------------------------------------------------
 cat > "$ROOTFS/etc/systemd/system/podroid-bootstrap.service" <<'EOF'
@@ -264,6 +270,7 @@ Kernel \r on \m (\l)
   Default login:  root / kali
   Install tools:  apt update && apt install <pkg>
   Full toolset:   apt install kali-linux-default
+  AI assistants:  sudo podroid-install-ai   (Aider, shell-gpt, podroid-ai)
 
 EOF
 
