@@ -50,11 +50,19 @@ class ModelManager @Inject constructor(
     /** True if the installed file's recorded source URL no longer matches
      *  the catalogue entry — happens when we swap a model's URL (e.g. the
      *  Q4_K_M → Q4_0 catalogue change for Adreno compatibility). The
-     *  picker UI can offer a "Re-download" affordance in that case. */
+     *  picker UI can offer a "Re-download" affordance in that case.
+     *
+     *  Files downloaded before the .url stamp was introduced have no
+     *  stamp at all — treat those as stale too. Users who upgrade the
+     *  app and still have pre-stamping models on disk see the
+     *  re-download hint and can recover with one tap. After they
+     *  accept, the new download writes a stamp and future calls are
+     *  exact-URL-match. */
     fun isStale(spec: ModelSpec): Boolean {
         val f = fileFor(spec.id) ?: return false
-        val recorded = File(f.parentFile, "${spec.id}.url").takeIf { it.exists() }?.readText()?.trim()
-        return recorded != null && recorded != spec.downloadUrl
+        val stampFile = File(f.parentFile, "${spec.id}.url")
+        if (!stampFile.exists()) return true   // legacy file, no provenance
+        return stampFile.readText().trim() != spec.downloadUrl
     }
 
     /** Installed catalogue intersection — used by the picker. */
