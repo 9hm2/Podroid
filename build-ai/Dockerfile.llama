@@ -63,15 +63,17 @@ ENV ANDROID_NDK_HOME=${ANDROID_NDK}
 # version is read from the NDK header so a future NDK bump just works.
 # Only the *.hpp files end up in /opt/vulkan-hpp-include — vulkan.h
 # itself stays the NDK sysroot's, since that's the ABI source of truth.
+#
+# SPIRV-Headers: b9000+ also #includes <spirv/unified1/spirv.hpp> from
+# the SPIR-V spec headers (used by the Vulkan backend for shader
+# reflection). Khronos/SPIRV-Headers is backwards-compatible across
+# spec versions; clone latest tag and drop spirv/ next to vulkan/.
 RUN VK_VER=$(grep -E "^\s*#\s*define\s+VK_HEADER_VERSION\s+" \
         "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/vulkan_core.h" \
         | awk '{print $NF}'); \
     test -n "$VK_VER" || { echo "FATAL: VK_HEADER_VERSION not found in NDK"; exit 1; }; \
     echo "NDK Vulkan header version: 1.3.${VK_VER}"; \
-    # Discover the matching tag dynamically — Vulkan-Hpp has used three
-    # different formats (v1.3.NNN, vulkan-sdk-1.3.NNN, vulkan-sdk-1.3.NNN.0)
-    # over the years. Lists every tag, greps for ones ending in NNN, prefers
-    # the cleanest form, falls back to anything containing the version.
+    # Discover the matching Vulkan-Hpp tag dynamically.
     REMOTE_TAGS=$(git ls-remote --tags --refs https://github.com/KhronosGroup/Vulkan-Hpp.git \
         | awk '{print $2}' | sed 's|refs/tags/||'); \
     TAG=$(echo "$REMOTE_TAGS" | grep -E "^v1\.3\.${VK_VER}$" | head -1); \
@@ -85,7 +87,20 @@ RUN VK_VER=$(grep -E "^\s*#\s*define\s+VK_HEADER_VERSION\s+" \
     mkdir -p /opt/vulkan-hpp-include/vulkan && \
     cp -v /tmp/vulkan-hpp/vulkan/*.hpp /opt/vulkan-hpp-include/vulkan/ && \
     test -f /opt/vulkan-hpp-include/vulkan/vulkan.hpp || { echo "FATAL: vulkan.hpp not staged"; exit 1; } && \
-    rm -rf /tmp/vulkan-hpp
+    # SPIRV-Headers — pin by Vulkan SDK tag if we can, else fall back to
+    # any tag that matches our v275 spec lineage, else just latest.
+    SPV_TAGS=$(git ls-remote --tags --refs https://github.com/KhronosGroup/SPIRV-Headers.git \
+        | awk '{print $2}' | sed 's|refs/tags/||'); \
+    SPV_TAG=$(echo "$SPV_TAGS" | grep -E "^vulkan-sdk-1\.3\.${VK_VER}(\.0)?$" | head -1); \
+    [ -z "$SPV_TAG" ] && SPV_TAG=$(echo "$SPV_TAGS" | grep -E "vulkan-sdk-1\.3\." | sort -V | tail -1); \
+    [ -z "$SPV_TAG" ] && SPV_TAG=$(echo "$SPV_TAGS" | tail -1); \
+    test -n "$SPV_TAG" || { echo "FATAL: no SPIRV-Headers tag found"; exit 1; }; \
+    echo "Cloning SPIRV-Headers tag: $SPV_TAG"; \
+    git clone --depth 1 --branch "$SPV_TAG" \
+        https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spirv-headers; \
+    cp -rv /tmp/spirv-headers/include/spirv /opt/vulkan-hpp-include/ && \
+    test -f /opt/vulkan-hpp-include/spirv/unified1/spirv.hpp || { echo "FATAL: spirv.hpp not staged"; exit 1; } && \
+    rm -rf /tmp/vulkan-hpp /tmp/spirv-headers
 
 # Shallow-clone-then-fetch-then-checkout pattern works for any tag-or-SHA
 # pin without surprising the user with a 1+ GB clone. Echoes the SHA so
