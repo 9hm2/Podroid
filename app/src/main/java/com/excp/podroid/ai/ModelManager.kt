@@ -47,6 +47,16 @@ class ModelManager @Inject constructor(
 
     fun isInstalled(modelId: String): Boolean = fileFor(modelId) != null
 
+    /** True if the installed file's recorded source URL no longer matches
+     *  the catalogue entry — happens when we swap a model's URL (e.g. the
+     *  Q4_K_M → Q4_0 catalogue change for Adreno compatibility). The
+     *  picker UI can offer a "Re-download" affordance in that case. */
+    fun isStale(spec: ModelSpec): Boolean {
+        val f = fileFor(spec.id) ?: return false
+        val recorded = File(f.parentFile, "${spec.id}.url").takeIf { it.exists() }?.readText()?.trim()
+        return recorded != null && recorded != spec.downloadUrl
+    }
+
     /** Installed catalogue intersection — used by the picker. */
     fun installedCatalogue(): List<ModelSpec> =
         ModelCatalogue.all.filter { isInstalled(it.id) }
@@ -104,6 +114,10 @@ class ModelManager @Inject constructor(
                 }
             }
             if (!tmp.renameTo(dest)) throw RuntimeException("rename ${tmp.name} → ${dest.name} failed")
+            // Stamp the source URL so a future catalogue URL bump can be
+            // detected (isStale) and the picker can offer a re-download
+            // without making the user think to delete + reinstall.
+            File(dir, "${spec.id}.url").writeText(spec.downloadUrl)
             _progress.emit(DownloadEvent.Done(spec.id, dest))
             dest
         } catch (e: CancellationException) {
@@ -118,8 +132,11 @@ class ModelManager @Inject constructor(
         }
     }
 
-    fun delete(modelId: String): Boolean = File(dir, "$modelId.gguf").let {
-        it.exists() && it.delete()
+    fun delete(modelId: String): Boolean {
+        val ok = File(dir, "$modelId.gguf").let { it.exists() && it.delete() }
+        // Also drop the URL stamp — otherwise isStale() lies after a delete.
+        File(dir, "$modelId.url").delete()
+        return ok
     }
 
     fun totalDiskUsageBytes(): Long =

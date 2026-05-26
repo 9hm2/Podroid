@@ -70,6 +70,7 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
     // installedModelIds() reads the filesystem; recompute whenever a
     // download event flows through. Cheap (just listFiles + length check).
     val installed = remember(downloadEvent) { vm.installedModelIds() }
+    val stale     = remember(downloadEvent) { vm.staleModelIds() }
 
     PodroidSectionLabel("AI Engine")
 
@@ -152,6 +153,7 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
     )
     ModelCatalogue.all.forEach { spec ->
         val isInstalled = spec.id in installed
+        val isStale = spec.id in stale
         val isActive = spec.id == p.modelId
         val activeDownload = downloadEvent?.takeIf { it.modelId == spec.id }
         val isDownloading = activeDownload is ModelManager.DownloadEvent.Progress
@@ -196,6 +198,17 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (isStale) {
+                    Text(
+                        "⚠ outdated quantisation — tap Re-download for the GPU-compatible Q4_0 build",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    TextButton(
+                        onClick = { vm.redownloadModel(spec.id) },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    ) { Text("Re-download (Q4_0)") }
+                }
                 when (val ev = activeDownload) {
                     is ModelManager.DownloadEvent.Progress -> {
                         val pct = if (ev.total > 0) (ev.written.toFloat() / ev.total) else 0f

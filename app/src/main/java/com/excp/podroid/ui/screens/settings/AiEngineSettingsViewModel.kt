@@ -73,6 +73,25 @@ class AiEngineSettingsViewModel @Inject constructor(
     fun installedModelIds(): Set<String> =
         ModelCatalogue.all.filter { modelManager.isInstalled(it.id) }.map { it.id }.toSet()
 
+    /** Subset of installedModelIds where the on-disk file came from a now-
+     *  obsolete URL (the catalogue entry was changed). Triggers the
+     *  "Re-download" hint in the picker. */
+    fun staleModelIds(): Set<String> =
+        ModelCatalogue.all.filter { modelManager.isStale(it) }.map { it.id }.toSet()
+
+    /** Force a delete-then-download cycle. Used when the picker shows the
+     *  stale-URL hint and the user accepts. */
+    fun redownloadModel(id: String) {
+        val spec = ModelCatalogue.byId(id) ?: return
+        viewModelScope.launch {
+            runCatching {
+                modelManager.delete(id)
+                modelManager.download(spec)
+                repository.setModelId(id)
+            }
+        }
+    }
+
     fun capabilities(): DeviceCapabilities = detector.probe()
 
     // ── Setters (each fires-and-forgets a coroutine) ───────────────────────
