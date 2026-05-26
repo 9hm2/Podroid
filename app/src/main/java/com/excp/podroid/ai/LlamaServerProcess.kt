@@ -42,6 +42,11 @@ class LlamaServerProcess @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var process: Process? = null
     private var watcher: Job? = null
+    // Remembered across the watch() callback so the GPU-crash fallback can
+    // restart with the same model/port without re-resolving the user
+    // profile (which would still say "use GPU").
+    private var lastProfile: BackendProfile? = null
+    private var lastPort: Int = 0
 
     private val _state = MutableStateFlow<AiEngineState>(AiEngineState.Idle)
     val state: StateFlow<AiEngineState> = _state.asStateFlow()
@@ -60,6 +65,14 @@ class LlamaServerProcess @Inject constructor(
             Log.d(TAG, "start() ignored — already running")
             return true
         }
+        return startInternal(profile, port, isFallback = false)
+    }
+
+    /** Real start work. isFallback=true is the auto-rerun after a GPU
+     *  crash — it skips the "already running" short-circuit (we just
+     *  killed the GPU attempt) and appends an explanatory banner to
+     *  the captured log so the user knows why we're on CPU. */
+    private fun startInternal(profile: BackendProfile, port: Int, isFallback: Boolean): Boolean {
         val model = modelManager.fileFor(profile.modelId) ?: run {
             _state.value = AiEngineState.Failed("Model '${profile.modelId}' not installed")
             return false
@@ -71,11 +84,18 @@ class LlamaServerProcess @Inject constructor(
         }
 
         val caps = detector.probe()
-        val effectiveBackend = detector.resolveBackend(profile, caps)
+        val effectiveBackend = if (isFallback) AiBackend.CPU
+                               else detector.resolveBackend(profile, caps)
         val cmd = buildCommand(bin, model, profile, effectiveBackend, port, caps)
 
+        lastProfile = profile
+        lastPort = port
         _state.value = AiEngineState.Starting
-        logFile.writeText("[podroid-ai] launching: ${cmd.joinToString(" ")}\n")
+        if (isFallback) {
+            logFile.appendText("\n[podroid-ai] GPU init crashed — re-launching with -ngl 0 (CPU)\n")
+        } else {
+            logFile.writeText("[podroid-ai] launching: ${cmd.joinToString(" ")}\n")
+        }
 
         return runCatching {
             val pb = ProcessBuilder(cmd)
@@ -123,21 +143,47 @@ class LlamaServerProcess @Inject constructor(
         try {
             val rc = p.waitFor()
             // If we asked it to stop, state is already Stopping/Idle.
-            if (_state.value is AiEngineState.Running) {
-                _state.value = if (rc == 0) {
-                    AiEngineState.Idle
-                } else {
-                    // Pull the last non-blank log line — that's almost always the
-                    // root error ("unknown argument: --foo", "failed to load model",
-                    // "could not bind to port"). Surfaces in the Settings status
-                    // pill so the user doesn't need to export diagnostics first.
-                    val tail = runCatching {
-                        logFile.readLines().lastOrNull { it.isNotBlank() }
-                    }.getOrNull().orEmpty()
-                    val suffix = if (tail.isNotBlank()) " — ${tail.take(160)}" else " — see logs"
-                    AiEngineState.Failed("llama-server exited rc=$rc$suffix")
-                }
+            if (_state.value !is AiEngineState.Running) return
+            if (rc == 0) {
+                _state.value = AiEngineState.Idle
+                return
             }
+            val logText = runCatching { logFile.readText() }.getOrNull().orEmpty()
+            val tail = logText.lineSequence().lastOrNull { it.isNotBlank() }.orEmpty()
+
+            // Auto-fallback: GPU init failed with a known driver pattern
+            // (Adreno's missing int-dot-product, or any compute-pipeline
+            // create failure). Re-launch with -ngl 0 (CPU only) instead
+            // of surfacing the crash. The user sees "Running (CPU
+            // fallback)" rather than a permanent Failed state.
+            val gpuCrashed = backend != AiBackend.CPU && (
+                logText.contains("createComputePipeline") ||
+                logText.contains("int dot: 0") ||
+                logText.contains("ggml_vulkan: Compute pipeline creation failed") ||
+                rc == 139 /* SIGSEGV — b6500 era pipeline-create segfault */
+            )
+            if (gpuCrashed) {
+                Log.w(TAG, "GPU backend crashed (rc=$rc) — restarting with CPU fallback")
+                process = null
+                _state.value = AiEngineState.Starting
+                // Restart synchronously on the IO scope. Build a CPU-only
+                // profile snapshot for this attempt; the user's persisted
+                // BackendProfile stays untouched so a future device with
+                // working Vulkan picks it up.
+                val cpuProfile = lastProfile?.copy(
+                    backend = AiBackend.CPU, gpuLayers = 0,
+                ) ?: return
+                val cpuOk = startInternal(cpuProfile, lastPort, isFallback = true)
+                if (!cpuOk) {
+                    _state.value = AiEngineState.Failed(
+                        "GPU backend crashed AND CPU fallback failed to launch — see logs",
+                    )
+                }
+                return
+            }
+
+            val suffix = if (tail.isNotBlank()) " — ${tail.take(160)}" else " — see logs"
+            _state.value = AiEngineState.Failed("llama-server exited rc=$rc$suffix")
         } catch (_: InterruptedException) {
             // scope cancellation — ignored
         } finally {
