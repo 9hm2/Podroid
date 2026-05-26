@@ -50,6 +50,7 @@ class PodroidService : Service() {
     @Inject lateinit var settingsRepository: SettingsRepository
     @Inject lateinit var usbPassthroughManager: UsbPassthroughManager
     @Inject lateinit var gpsBridgeManager: GpsBridgeManager
+    @Inject lateinit var aiEngineRepository: com.excp.podroid.ai.AiEngineRepository
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var notificationJob: Job? = null
@@ -134,6 +135,10 @@ class PodroidService : Service() {
         notificationJob?.cancel()
         usbPassthroughManager.stop()
         gpsBridgeManager.stop()
+        // VM is on its way down — drag the AI engine with it. pause() not
+        // stop() so the persisted "enabled" flag survives; if the user
+        // re-launches the VM we want the engine to auto-resume.
+        com.excp.podroid.ai.AiEngineService.pause(this)
         releaseWakeLock()
         serviceScope.cancel()
     }
@@ -279,6 +284,27 @@ class PodroidService : Service() {
         }
     }
 
+    /** Ties the AI engine subprocess lifecycle to the VM lifecycle.
+     *  When the VM reaches Running we start the AI engine foreground
+     *  service (so the model is ready by the time `podroid-ai` / Aider
+     *  call it from the VM over SLIRP). When the VM stops we stop the
+     *  engine — keeping it running with no VM consumer would just hold
+     *  ~2 GB of model in RAM for nothing. Only attached when the user
+     *  flipped the toggle on in Settings; manual start/stop from the
+     *  Settings panel still works without this observer. */
+    private suspend fun observeStateForAi() {
+        engine.state.collect { state ->
+            when (state) {
+                is VmState.Running -> com.excp.podroid.ai.AiEngineService.start(this@PodroidService)
+                is VmState.Stopped, is VmState.Idle, is VmState.Error ->
+                    // pause() not stop() — keep the persisted enable flag on
+                    // so the next VM-start auto-resumes the engine.
+                    com.excp.podroid.ai.AiEngineService.pause(this@PodroidService)
+                else -> {}
+            }
+        }
+    }
+
     private fun launchPodroid() {
         serviceScope.launch {
             startNotificationUpdates()
@@ -326,6 +352,13 @@ class PodroidService : Service() {
                     }
                     if (config.gpsBridgeEnabled) {
                         serviceScope.launch { observeStateForGps() }
+                    }
+                    // AI engine: tracks the user's Settings toggle. The
+                    // observer reads enabled fresh per VM-state transition,
+                    // so flipping the toggle off mid-session (or back on)
+                    // is honoured at the next state change.
+                    if (aiEngineRepository.isEnabled()) {
+                        serviceScope.launch { observeStateForAi() }
                     }
                     engine.start(rules, config)
                 } catch (e: Exception) {

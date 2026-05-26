@@ -76,9 +76,11 @@ class AiEngineService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> scope.launch { startEngine() }
-            ACTION_STOP  -> scope.launch { stopEngine() }
-            else         -> scope.launch { startEngine() }
+            ACTION_START   -> scope.launch { startEngine() }
+            ACTION_STOP    -> scope.launch { stopEngine(clearEnabled = true) }
+            ACTION_PAUSE   -> scope.launch { stopEngine(clearEnabled = false) }
+            ACTION_RESTART -> scope.launch { restartEngine() }
+            else           -> scope.launch { startEngine() }
         }
         attachThermalListener()
         return START_STICKY
@@ -94,10 +96,28 @@ class AiEngineService : Service() {
         }
     }
 
-    private suspend fun stopEngine() {
-        process.stop("user")
-        repository.setEnabled(false)
+    /** [clearEnabled]=true means the user explicitly turned the engine off
+     *  (Settings toggle, notification Stop button) — the persisted flag
+     *  flips so the engine stays off across future VM launches. false is
+     *  for VM-coupled pauses (PodroidService observer): only the process
+     *  goes down; `enabled` stays so the next VM start brings the engine
+     *  back automatically. */
+    private suspend fun stopEngine(clearEnabled: Boolean) {
+        process.stop(if (clearEnabled) "user" else "vm-stopped")
+        if (clearEnabled) repository.setEnabled(false)
         stopSelf()
+    }
+
+    /** Hard-restart: stop the subprocess and immediately re-launch with the
+     *  user's current profile. Used by the notification "Restart" action
+     *  when something has gone sideways and the user wants a clean retry
+     *  without re-entering Settings. Does NOT flip the `enabled` flag —
+     *  it stays on. */
+    private suspend fun restartEngine() {
+        process.stop("restart")
+        // Give the OS a beat to release the listening port before re-bind.
+        kotlinx.coroutines.delay(300)
+        startEngine()
     }
 
     private fun attachThermalListener() {
@@ -159,6 +179,11 @@ class AiEngineService : Service() {
             Intent(this, AiEngineService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val restartPi = PendingIntent.getService(
+            this, 2,
+            Intent(this, AiEngineService::class.java).setAction(ACTION_RESTART),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Podroid AI")
@@ -166,13 +191,19 @@ class AiEngineService : Service() {
             .setContentIntent(contentPi)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(NotificationCompat.Action(0, "Restart", restartPi))
             .addAction(NotificationCompat.Action(0, "Stop", stopPi))
             .build()
     }
 
     companion object {
-        const val ACTION_START = "com.excp.podroid.ai.START"
-        const val ACTION_STOP  = "com.excp.podroid.ai.STOP"
+        const val ACTION_START   = "com.excp.podroid.ai.START"
+        /** User-initiated full stop: process down + `enabled=false`. */
+        const val ACTION_STOP    = "com.excp.podroid.ai.STOP"
+        /** VM-coupled pause: process down but `enabled` stays so the next
+         *  VM-start auto-resumes the engine. Use from PodroidService only. */
+        const val ACTION_PAUSE   = "com.excp.podroid.ai.PAUSE"
+        const val ACTION_RESTART = "com.excp.podroid.ai.RESTART"
         private const val CHANNEL_ID = "podroid_ai"
         private const val NOTIF_ID = 1101
         private const val TAG = "AiEngineService"
@@ -185,6 +216,16 @@ class AiEngineService : Service() {
         fun stop(context: Context) {
             val i = Intent(context, AiEngineService::class.java).setAction(ACTION_STOP)
             context.startService(i)
+        }
+        /** VM-driven pause — keeps the user's toggle on. */
+        fun pause(context: Context) {
+            val i = Intent(context, AiEngineService::class.java).setAction(ACTION_PAUSE)
+            context.startService(i)
+        }
+        fun restart(context: Context) {
+            val i = Intent(context, AiEngineService::class.java).setAction(ACTION_RESTART)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i)
+            else context.startService(i)
         }
     }
 }
