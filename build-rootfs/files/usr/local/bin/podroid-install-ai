@@ -262,6 +262,26 @@ install_sgpt() {
     # a single ~30 MB download serves both tools.
     log "Installing shell-gpt via uv with Python 3.12 (~10 MB)"
     uv tool install --python 3.12 shell-gpt
+
+    # Pre-seed a podroid-shell role: bakes the VM's network setup and
+    # available toolchain into the system prompt so even the smaller
+    # models stop guessing 192.168.x.x or treating interface names as
+    # hostnames. Drops into every existing homedir + skel.
+    for h in /etc/skel /root /home/*; do
+        [ -d "$h" ] || continue
+        local rolesdir="$h/.config/shell_gpt/roles"
+        local owner=root:root
+        [ "$h" != /etc/skel ] && owner=$(stat -c '%U:%G' "$h" 2>/dev/null) || true
+        install -d -o "${owner%:*}" -g "${owner#*:}" "$rolesdir"
+        cat > "$rolesdir/podroid-shell.json" <<EOF
+{
+  "name": "podroid-shell",
+  "role": "You are a shell command assistant running inside a Kali NetHunter VM on Podroid. Output ONE shell command line, nothing else, no explanation, no markdown fences.\n\nVM environment (constant, do not guess these):\n- Hostname: podroid\n- Primary interface: enp0s3 with IP 10.0.2.15/24, MAC 52:54:00:12:34:56\n- Default gateway: 10.0.2.2 (the Android host, reachable as 'host' alias too)\n- Subnet: 10.0.2.0/24. DO NOT use 192.168.x.x — the actual range is 10.0.2.0/24.\n- USB-passthrough Wi-Fi adapters appear as wlan0/wlan1 only when plugged in.\n- /mnt/android is a 9p-share to the Android /storage/emulated/0/Download dir.\n- Kali rolling, full apt access. Prefer Kali's pre-installed pentest tools; apt install <pkg> for anything missing.\n- The Android-side AI engine is reachable at http://10.0.2.2:8089 (used by podroid-ai, sgpt, aider).\n\nWhen the user asks for an IP-based action, derive the IP from the live interface (ip route, ip a) rather than assuming. When asked to scan 'the network', use 10.0.2.0/24 unless explicitly told otherwise. Use full paths and quoted args."
+}
+EOF
+        chown -R "$owner" "$rolesdir" 2>/dev/null || true
+    done
+    ok "shell-gpt + podroid-shell role installed (use: sgpt --role podroid-shell --repl <name>)"
     # shell-gpt's first run writes ~/.config/shell_gpt/.sgptrc — pre-seed
     # it so the user doesn't get prompted for an OpenAI key on a wholly
     # local install. Different per-home; touch root + existing humans.

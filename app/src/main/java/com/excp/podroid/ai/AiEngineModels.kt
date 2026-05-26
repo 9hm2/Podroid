@@ -145,14 +145,24 @@ object ModelCatalogue {
             description = "Microsoft's flagship small model. Z Fold 5 GPU ~10-12 tok/s.",
         ),
         ModelSpec(
+            id = "qwen2.5-coder-7b-q4",
+            displayName = "Qwen2.5-Coder 7B (recommended for Aider)",
+            sizeMb = 4430,
+            ramRequiredMb = 6500,
+            recommendedContext = 8192,
+            downloadUrl = "https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_0.gguf",
+            sha256 = "",
+            description = "Code-tuned 7B; follows Aider's SEARCH/REPLACE edit format reliably. Z Fold 5 CPU ~4-5 tok/s.",
+        ),
+        ModelSpec(
             id = "llama-3.1-8b-q4",
-            displayName = "Llama 3.1 8B Instruct (heavy)",
+            displayName = "Llama 3.1 8B Instruct (general reasoning)",
             sizeMb = 4660,
             ramRequiredMb = 6500,
             recommendedContext = 4096,
             downloadUrl = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_0.gguf",
             sha256 = "",
-            description = "Full chat & reasoning. Needs ≥12 GB RAM phone. Z Fold 5 GPU ~5-7 tok/s.",
+            description = "Better at multi-step pentest reasoning than smaller models. Z Fold 5 CPU ~3-4 tok/s.",
         ),
     )
 
