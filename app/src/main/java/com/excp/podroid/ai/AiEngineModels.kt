@@ -93,58 +93,66 @@ data class DeviceCapabilities(
 
 /** The catalogue of models the picker shows. Hard-coded for predictability
  *  — adding a model means a code change with a verified SHA256. URLs are
- *  HuggingFace's `resolve/main` direct-download links. */
+ *  HuggingFace's `resolve/main` direct-download links.
+ *
+ *  Quant choice: **Q4_0 instead of Q4_K_M** — slightly lower quality
+ *  (~2-3% higher perplexity) but K-quant shaders in llama.cpp's Vulkan
+ *  backend need VK_KHR_shader_integer_dot_product, which Adreno (SD 8
+ *  Gen 2/3) doesn't expose. Q4_0's float-only matmul kernels compile
+ *  cleanly on every Vulkan 1.2+ device — Adreno, Mali, PowerVR, Intel,
+ *  AMD. CPU+NEON eats either format. Universal GPU + CPU coverage in
+ *  exchange for a tiny quality hit. */
 object ModelCatalogue {
     val all: List<ModelSpec> = listOf(
         ModelSpec(
             id = "qwen2.5-0.5b-q4",
             displayName = "Qwen2.5 0.5B (tiny, fast)",
-            sizeMb = 397,
+            sizeMb = 352,
             ramRequiredMb = 800,
             recommendedContext = 4096,
-            downloadUrl = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+            downloadUrl = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_0.gguf",
             sha256 = "",  // populated on first download; verified-from-then-on
             description = "Command synthesis only. Real-time on any device.",
         ),
         ModelSpec(
             id = "tinyllama-1.1b-q4",
             displayName = "TinyLlama 1.1B (balanced)",
-            sizeMb = 669,
+            sizeMb = 637,
             ramRequiredMb = 1500,
             recommendedContext = 2048,
-            downloadUrl = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+            downloadUrl = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
             sha256 = "",
-            description = "Short Q&A, command help. ~10-15 tok/s on mid-tier.",
+            description = "Short Q&A, command help. ~15-20 tok/s on Z Fold 5 GPU.",
         ),
         ModelSpec(
             id = "qwen2.5-3b-q4",
             displayName = "Qwen2.5 3B Instruct (recommended)",
-            sizeMb = 1929,
+            sizeMb = 1830,
             ramRequiredMb = 3500,
             recommendedContext = 4096,
-            downloadUrl = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+            downloadUrl = "https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_0.gguf",
             sha256 = "",
-            description = "Good chat, output explanation, scripting. Z Fold 5 ~15 tok/s.",
+            description = "Good chat, output explanation, scripting. Z Fold 5 GPU ~12-15 tok/s.",
         ),
         ModelSpec(
             id = "phi-3-mini-q4",
             displayName = "Phi-3 Mini 3.8B (quality)",
-            sizeMb = 2390,
+            sizeMb = 2280,
             ramRequiredMb = 4500,
             recommendedContext = 4096,
-            downloadUrl = "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+            downloadUrl = "https://huggingface.co/bartowski/Phi-3-mini-4k-instruct-GGUF/resolve/main/Phi-3-mini-4k-instruct-Q4_0.gguf",
             sha256 = "",
-            description = "Microsoft's flagship small model. Z Fold 5 ~10-12 tok/s.",
+            description = "Microsoft's flagship small model. Z Fold 5 GPU ~10-12 tok/s.",
         ),
         ModelSpec(
             id = "llama-3.1-8b-q4",
             displayName = "Llama 3.1 8B Instruct (heavy)",
-            sizeMb = 4920,
+            sizeMb = 4660,
             ramRequiredMb = 6500,
             recommendedContext = 4096,
-            downloadUrl = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+            downloadUrl = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_0.gguf",
             sha256 = "",
-            description = "Full chat & reasoning. Needs ≥12 GB RAM phone. Z Fold 5 ~5-7 tok/s.",
+            description = "Full chat & reasoning. Needs ≥12 GB RAM phone. Z Fold 5 GPU ~5-7 tok/s.",
         ),
     )
 

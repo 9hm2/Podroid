@@ -18,12 +18,13 @@
 FROM ubuntu:24.04 AS llama-builder
 
 ARG NDK_VERSION=r27c
-# Pinned commit (b5300, April 2025). Bumped from b4500 because Adreno
-# Vulkan compute pipeline create still threw VK_ERROR_UNKNOWN on Z Fold 5
-# / SD 8 Gen 2 with the older shader generators. b5000+ landed the major
-# Vulkan refactor with proper subgroup-size handling for mobile GPUs;
-# b5300 is a stable point well past that.
-ARG LLAMA_REF=b5300
+# Pinned commit (b6500, July 2025). Bumped to pick up the latest mobile
+# GPU compatibility work — Adreno-specific subgroup fallbacks and the
+# tighter pipeline-create error reporting that surfaced the int-dot=0
+# limitation. Combined with our switch to Q4_0 quants in the model
+# catalogue (which sidestep K-quant's integer-dot-product requirement)
+# this lets Z Fold 5 / SD 8 Gen 2 actually run on the GPU.
+ARG LLAMA_REF=b6500
 
 # vulkan-shaders-gen runs natively on the host (build machine) to compile
 # GLSL → SPIR-V which then gets embedded into the cross-compiled .so.
