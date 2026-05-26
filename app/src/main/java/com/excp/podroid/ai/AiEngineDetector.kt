@@ -102,17 +102,26 @@ class AiEngineDetector @Inject constructor(
      *  user explicitly picked CPU / VULKAN / HEXAGON we honour that even
      *  if it'll be slow.
      *
-     *  GPU works universally on Vulkan 1.2+ now that the model catalogue
-     *  ships Q4_0 quants (Q4_K-class shaders would otherwise blow up on
-     *  Adreno's int-dot-0 driver — Q4_0 is float-only and compiles on
-     *  every conformant Vulkan device).
+     *  Adreno reality: even with Q4_0 quants, llama.cpp's Vulkan backend
+     *  on Snapdragon 8 Gen 2/3 (Adreno 7xx) fails to compile multiple
+     *  matmul shader variants — not just the K-quant ones. The bug is
+     *  driver-level (missing extensions) and llama.cpp doesn't fall
+     *  back gracefully for the failing shaders. End-to-end testing
+     *  shows the only reliable path on Qualcomm is CPU+NEON; the
+     *  Cortex-X3 cluster delivers 12-15 tok/s on TinyLlama Q4 which
+     *  is plenty for Aider / shell-gpt workflows.
+     *
+     *  AUTO therefore picks CPU on Qualcomm regardless of tier. Mali /
+     *  PowerVR / Intel / AMD keep the Vulkan path (their drivers
+     *  compile llama.cpp's shaders cleanly).
      */
     fun resolveBackend(profile: BackendProfile, caps: DeviceCapabilities): AiBackend =
         if (profile.backend != AiBackend.AUTO) profile.backend
-        else when (caps.tier) {
-            AiTier.HIGH -> if (caps.vulkanLevel >= 2) AiBackend.VULKAN else AiBackend.CPU
-            AiTier.MID  -> if (caps.vulkanLevel >= 2) AiBackend.VULKAN else AiBackend.CPU
-            AiTier.LOW  -> AiBackend.CPU
+        else when {
+            caps.isQualcomm -> AiBackend.CPU
+            caps.tier == AiTier.LOW -> AiBackend.CPU
+            caps.vulkanLevel >= 2 -> AiBackend.VULKAN
+            else -> AiBackend.CPU
         }
 
     private fun pickTier(ramGb: Int, vulkanLevel: Int): AiTier = when {

@@ -110,6 +110,17 @@ class LlamaServerProcess @Inject constructor(
             // Keep tokeniser parallelism in check — llama.cpp respects this.
             pb.environment().remove("OMP_NUM_THREADS")
 
+            // CPU-only run: actively suppress llama.cpp's Vulkan backend so
+            // it doesn't enumerate devices and try to compile shaders
+            // anyway (b9000 still initialises Vulkan at startup regardless
+            // of -ngl 0; on Adreno's broken K-quant + matmul_q4_0 shaders
+            // that init crashes the whole process before the model loads).
+            // GGML_VK_VISIBLE_DEVICES="999" matches no physical device,
+            // so the backend registers zero entries and skips compile.
+            if (effectiveBackend == AiBackend.CPU) {
+                pb.environment()["GGML_VK_VISIBLE_DEVICES"] = "999"
+            }
+
             val proc = pb.start()
             process = proc
             _state.value = AiEngineState.Running(profile.modelId, effectiveBackend)
@@ -143,7 +154,10 @@ class LlamaServerProcess @Inject constructor(
         try {
             val rc = p.waitFor()
             // If we asked it to stop, state is already Stopping/Idle.
-            if (_state.value !is AiEngineState.Running) return
+            // Starting → Failed is acceptable too (process crashed before
+            // we observed it as Running) so we keep going.
+            if (_state.value is AiEngineState.Stopping) return
+            if (_state.value is AiEngineState.Idle) return
             if (rc == 0) {
                 _state.value = AiEngineState.Idle
                 return
