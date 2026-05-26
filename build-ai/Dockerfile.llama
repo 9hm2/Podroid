@@ -137,7 +137,18 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
         -DLLAMA_CURL=OFF \
         -DBUILD_SHARED_LIBS=OFF && \
     cmake --build build-host --target vulkan-shaders-gen -j"$(nproc)" && \
-    test -x build-host/bin/vulkan-shaders-gen || { echo "FATAL: host vulkan-shaders-gen not built"; exit 1; }; \
+    # b6500's CMake builds vulkan-shaders-gen via ExternalProject_Add and
+    # installs it at build-host/Release/vulkan-shaders-gen. Older layouts
+    # put it at build-host/bin/vulkan-shaders-gen. Accept either, then add
+    # both paths to PATH for pass 2.
+    HOST_VKGEN=$(ls build-host/bin/vulkan-shaders-gen \
+                    build-host/Release/vulkan-shaders-gen 2>/dev/null | head -1); \
+    test -n "$HOST_VKGEN" -a -x "$HOST_VKGEN" \
+        || { echo "FATAL: host vulkan-shaders-gen not built"; \
+             echo "Looked in: build-host/bin and build-host/Release"; \
+             find build-host -name vulkan-shaders-gen -executable 2>/dev/null; \
+             exit 1; }; \
+    echo "host vulkan-shaders-gen: $HOST_VKGEN"; \
     echo "=== Pass 2: Android arm64 cross-compile ==="; \
     cmake -B build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
@@ -156,7 +167,9 @@ RUN GLSLC=$(find ${ANDROID_NDK} -name glslc -type f -executable 2>/dev/null | he
 
 # Put pass 1's host-native shader generator on PATH for pass 2's build
 # step, where the `Generate vulkan shaders` rule invokes it by bare name.
-ENV PATH="/work/llama.cpp/build-host/bin:${PATH}"
+# Both directories are added because b6500's CMake installs to Release/
+# while older llama.cpp layouts use bin/.
+ENV PATH="/work/llama.cpp/build-host/bin:/work/llama.cpp/build-host/Release:${PATH}"
 
 # Build only what we ship — the server. If the target name ever moves
 # (it has been `server` → `llama-server` historically), bail clearly so
