@@ -189,13 +189,53 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool installs
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool installs — Python tools go via uv (Astral) instead of bare pipx.
+#
+# Why uv: aider-chat (and most modern ML-adjacent Python tools) pulls
+# numpy / pandas / scipy through transitive deps. On Python 3.13 (Kali
+# rolling 2026+) those packages have no pre-built wheels for some pinned
+# versions and pip falls back to compiling numpy 1.24.3 from source —
+# which doesn't build on Python 3.13 at all, and even when it does needs
+# BLAS/LAPACK headers we don't ship. uv's resolver picks newer wheel-
+# available versions and uses --prefer-binary by default, sidestepping
+# the whole build trap. pipx alone hits "Fatal error from pip: numpy".
+# ─────────────────────────────────────────────────────────────────────────────
+
+ensure_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        return
+    fi
+    log "Bootstrapping uv (Astral Python tool installer)"
+    # uv ships pre-built static binaries on PyPI. pipx grabs it cleanly.
+    pipx install uv
+    # uv's symlink lands in PIPX_BIN_DIR (/usr/local/bin) — make sure
+    # PATH reflects that for the rest of this script even if our shell
+    # was started before the pipx install ran.
+    export PATH="$PIPX_BIN_DIR:$PATH"
+    command -v uv >/dev/null 2>&1 || { fail "uv install failed"; exit 1; }
+    ok "uv installed: $(uv --version 2>/dev/null)"
+}
+
+# uv tool install defaults to per-user dirs; pin to system layout so
+# every login session resolves the binaries from /usr/local/bin.
+export UV_TOOL_BIN_DIR=/usr/local/bin
+export UV_TOOL_DIR=/opt/uv-tools
+
 install_aider() {
     if command -v aider >/dev/null 2>&1; then
         ok "aider already installed: $(aider --version 2>/dev/null | head -1)"
         return
     fi
-    log "Installing Aider via pipx (this fetches ~200 MB transient, ~50 MB final)"
-    pipx install --include-deps aider-chat
+    ensure_uv
+    # Clean up any half-installed mess from earlier pipx attempts so a
+    # retry is truly idempotent — leftover venvs would otherwise shadow
+    # uv's install.
+    rm -rf "$PIPX_HOME/venvs/aider-chat" 2>/dev/null
+    rm -rf /root/.local/share/pipx/venvs/aider-chat 2>/dev/null
+    rm -f /usr/local/bin/aider 2>/dev/null
+    log "Installing Aider via uv (pre-built wheels, ~50 MB)"
+    uv tool install aider-chat
     command -v aider >/dev/null 2>&1 && ok "aider installed: $(aider --version 2>/dev/null | head -1)"
 }
 
@@ -204,8 +244,12 @@ install_sgpt() {
         ok "sgpt already installed"
         return
     fi
-    log "Installing shell-gpt via pipx (~10 MB)"
-    pipx install shell-gpt
+    ensure_uv
+    rm -rf "$PIPX_HOME/venvs/shell-gpt" 2>/dev/null
+    rm -rf /root/.local/share/pipx/venvs/shell-gpt 2>/dev/null
+    rm -f /usr/local/bin/sgpt 2>/dev/null
+    log "Installing shell-gpt via uv (~10 MB)"
+    uv tool install shell-gpt
     # shell-gpt's first run writes ~/.config/shell_gpt/.sgptrc — pre-seed
     # it so the user doesn't get prompted for an OpenAI key on a wholly
     # local install. Different per-home; touch root + existing humans.
