@@ -92,7 +92,15 @@ class AiEngineSettingsViewModel @Inject constructor(
 
     fun downloadModel(id: String) {
         val spec = ModelCatalogue.byId(id) ?: return
-        viewModelScope.launch { runCatching { modelManager.download(spec) } }
+        viewModelScope.launch {
+            runCatching {
+                modelManager.download(spec)
+                // Auto-activate the freshly-downloaded model — that's why the
+                // user tapped Download. Skipping this would leave them on the
+                // pre-download active model wondering why nothing changed.
+                repository.setModelId(id)
+            }
+        }
     }
 
     fun deleteModel(id: String) {

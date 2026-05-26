@@ -8,6 +8,7 @@
  */
 package com.excp.podroid.ui.screens.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -16,11 +17,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -124,27 +132,55 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
     )
 
     // ── Model picker ───────────────────────────────────────────────────────
+    // Radio-button style: installed models are clickable rows that swap the
+    // active selection. Non-installed show a Download icon. The active model
+    // gains a Delete icon on the trailing edge (delete a non-active one too —
+    // the radio prevents accidentally deleting the running one without
+    // reselecting first).
     Text(
         "Model",
         style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
     )
+    Text(
+        "Tap an installed model to make it active. Download adds new ones and " +
+            "selects them automatically.",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 4.dp),
+    )
     ModelCatalogue.all.forEach { spec ->
         val isInstalled = spec.id in installed
         val isActive = spec.id == p.modelId
         val activeDownload = downloadEvent?.takeIf { it.modelId == spec.id }
+        val isDownloading = activeDownload is ModelManager.DownloadEvent.Progress
 
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
+        val rowMod = Modifier
+            .fillMaxWidth()
+            .then(
+                if (isInstalled && !isActive)
+                    Modifier.clickable { vm.setModelId(spec.id) }
+                else Modifier,
+            )
+            .padding(vertical = 6.dp)
+
+        Row(modifier = rowMod, verticalAlignment = Alignment.CenterVertically) {
+            // Radio indicator: filled for active, empty-clickable for
+            // installed-inactive, disabled (dim) for not-installed.
+            RadioButton(
+                selected = isActive,
+                enabled = isInstalled,
+                onClick = if (isInstalled && !isActive) { { vm.setModelId(spec.id) } } else null,
+            )
+            Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         spec.displayName,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (isInstalled) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (isActive) {
                         Spacer(Modifier.width(8.dp))
@@ -162,11 +198,15 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
                 )
                 when (val ev = activeDownload) {
                     is ModelManager.DownloadEvent.Progress -> {
+                        val pct = if (ev.total > 0) (ev.written.toFloat() / ev.total) else 0f
                         LinearProgressIndicator(
-                            progress = {
-                                if (ev.total > 0) (ev.written.toFloat() / ev.total) else 0f
-                            },
+                            progress = { pct },
                             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        )
+                        Text(
+                            "downloading… ${(pct * 100).toInt()}% (${ev.written / (1024 * 1024)} / ${ev.total / (1024 * 1024)} MiB)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
                         )
                     }
                     is ModelManager.DownloadEvent.Failed -> {
@@ -179,10 +219,27 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
                     else -> Unit
                 }
             }
+            // Trailing action: download (if missing) or delete (if installed).
+            // Active model can still be deleted — UI will fall back to the
+            // next installed model on the repository side; less surprising
+            // than gating it behind a "switch first" step.
             when {
-                !isInstalled -> TextButton(onClick = { vm.downloadModel(spec.id) }) { Text("Download") }
-                !isActive    -> TextButton(onClick = { vm.setModelId(spec.id) })   { Text("Use") }
-                else         -> TextButton(onClick = { vm.deleteModel(spec.id) })  { Text("Delete") }
+                !isInstalled && !isDownloading -> IconButton(onClick = { vm.downloadModel(spec.id) }) {
+                    Icon(
+                        Icons.Default.Download,
+                        contentDescription = "Download ${spec.displayName}",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                isInstalled -> IconButton(onClick = { vm.deleteModel(spec.id) }) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "Delete ${spec.displayName}",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                else -> Spacer(Modifier.size(48.dp))
             }
         }
     }
