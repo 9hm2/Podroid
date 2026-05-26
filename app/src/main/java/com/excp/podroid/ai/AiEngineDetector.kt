@@ -64,8 +64,12 @@ class AiEngineDetector @Inject constructor(
             backend = AiBackend.AUTO,
             modelId = if (caps.totalRamGb >= 12) "qwen2.5-3b-q4" else "qwen2.5-3b-q4",
             contextSize = 4096,
-            gpuLayers = -1,         // all on GPU when Vulkan picks
-            threads = -1,           // big-cores-only
+            // Qualcomm Adreno can't compile llama.cpp's K-quant shaders
+            // (no VK_KHR_shader_integer_dot_product) so the AUTO resolver
+            // forces CPU there — match by keeping gpuLayers at 0 by default
+            // for those devices instead of -1 (all on GPU).
+            gpuLayers = if (caps.isQualcomm) 0 else -1,
+            threads = -1,
             flashAttention = true,
             kvCacheType = KvCacheType.F16,
             batchSize = 512,
@@ -76,7 +80,7 @@ class AiEngineDetector @Inject constructor(
             backend = AiBackend.AUTO,
             modelId = "tinyllama-1.1b-q4",
             contextSize = 2048,
-            gpuLayers = -1,
+            gpuLayers = if (caps.isQualcomm) 0 else -1,
             threads = -1,
             flashAttention = true,
             kvCacheType = KvCacheType.F16,
@@ -100,13 +104,32 @@ class AiEngineDetector @Inject constructor(
 
     /** Resolve `backend = AUTO` against the device capabilities. If the
      *  user explicitly picked CPU / VULKAN / HEXAGON we honour that even
-     *  if it'll be slow. */
+     *  if it'll be slow.
+     *
+     *  Adreno caveat: Snapdragon 8 Gen 2/3 GPUs (Adreno 7xx) ship Vulkan
+     *  drivers without `VK_KHR_shader_integer_dot_product`. llama.cpp's
+     *  K-quant (Q4_K / Q5_K / Q6_K) shaders require that opcode, so the
+     *  Adreno driver throws ErrorUnknown at pipeline-create time and
+     *  llama.cpp falls into an uncaught std::out_of_range. Until upstream
+     *  fixes the graceful fallback OR Qualcomm exposes int-dot, we
+     *  default AUTO to CPU on Qualcomm devices regardless of Vulkan
+     *  level. The user can still tick "Vulkan" in Settings if their
+     *  specific model + driver combo happens to work.
+     */
     fun resolveBackend(profile: BackendProfile, caps: DeviceCapabilities): AiBackend =
         if (profile.backend != AiBackend.AUTO) profile.backend
         else when (caps.tier) {
-            AiTier.HIGH -> if (caps.vulkanLevel >= 2) AiBackend.VULKAN else AiBackend.CPU
-            AiTier.MID  -> if (caps.vulkanLevel >= 2) AiBackend.VULKAN else AiBackend.CPU
-            AiTier.LOW  -> AiBackend.CPU
+            AiTier.HIGH -> when {
+                caps.isQualcomm -> AiBackend.CPU
+                caps.vulkanLevel >= 2 -> AiBackend.VULKAN
+                else -> AiBackend.CPU
+            }
+            AiTier.MID -> when {
+                caps.isQualcomm -> AiBackend.CPU
+                caps.vulkanLevel >= 2 -> AiBackend.VULKAN
+                else -> AiBackend.CPU
+            }
+            AiTier.LOW -> AiBackend.CPU
         }
 
     private fun pickTier(ramGb: Int, vulkanLevel: Int): AiTier = when {

@@ -205,6 +205,17 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
         selected = p.backend,
         onSelect = vm::setBackend,
     )
+    if (caps.isQualcomm && (p.backend == AiBackend.VULKAN ||
+            (p.backend == AiBackend.AUTO && caps.vulkanLevel >= 2))) {
+        Text(
+            "Heads up: Adreno's Vulkan driver doesn't expose integer dot product, " +
+                "so llama.cpp's K-quant (Q4_K/Q6_K) shaders fail to compile and the " +
+                "engine crashes mid-load. CPU+NEON is the reliable path on this device.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 6.dp, top = 2.dp, bottom = 4.dp),
+        )
+    }
     SettingChipRow(
         label = "Context size",
         options = listOf(1024, 2048, 4096, 8192).map { it to "$it tokens" },
