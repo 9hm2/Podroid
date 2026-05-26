@@ -18,14 +18,12 @@
 FROM ubuntu:24.04 AS llama-builder
 
 ARG NDK_VERSION=r27c
-# Pinned commit (b4500, Dec 2024). Bumped from b3617 because the older
-# Vulkan compute pipeline made hard subgroup-size assumptions that the
-# Qualcomm Adreno driver rejects with VK_ERROR_UNKNOWN — every model
-# load failed on Z Fold 5 / SD 8 Gen 2. b4500 lands the mobile-GPU
-# subgroup-fallback path that makes Adreno 7xx work; it's also when
-# `--cache-reuse` arrived as a server option (re-add at that callsite
-# if you want prefix-cache speedups for chat workflows).
-ARG LLAMA_REF=b4500
+# Pinned commit (b5300, April 2025). Bumped from b4500 because Adreno
+# Vulkan compute pipeline create still threw VK_ERROR_UNKNOWN on Z Fold 5
+# / SD 8 Gen 2 with the older shader generators. b5000+ landed the major
+# Vulkan refactor with proper subgroup-size handling for mobile GPUs;
+# b5300 is a stable point well past that.
+ARG LLAMA_REF=b5300
 
 # vulkan-shaders-gen runs natively on the host (build machine) to compile
 # GLSL → SPIR-V which then gets embedded into the cross-compiled .so.
@@ -86,11 +84,15 @@ RUN VK_VER=$(grep -E "^\s*#\s*define\s+VK_HEADER_VERSION\s+" \
     rm -rf /tmp/vulkan-hpp
 
 # Shallow-clone-then-fetch-then-checkout pattern works for any tag-or-SHA
-# pin without surprising the user with a 1+ GB clone.
-RUN git clone --filter=blob:none --no-checkout https://github.com/ggerganov/llama.cpp.git \
+# pin without surprising the user with a 1+ GB clone. Echoes the SHA so
+# the GHA build log shows clearly which commit produced the binary —
+# critical when diagnosing "did the bump actually take effect?".
+RUN echo "===== BUILDING WITH LLAMA.CPP REF: ${LLAMA_REF} =====" \
+ && git clone --filter=blob:none --no-checkout https://github.com/ggerganov/llama.cpp.git \
  && cd llama.cpp \
  && git fetch --depth 1 origin "${LLAMA_REF}" \
- && git checkout "${LLAMA_REF}"
+ && git checkout "${LLAMA_REF}" \
+ && echo "===== llama.cpp HEAD: $(git rev-parse --short HEAD) ($(git log -1 --format=%cd --date=short)) ====="
 WORKDIR /work/llama.cpp
 
 # Minimal, stable flag set:
