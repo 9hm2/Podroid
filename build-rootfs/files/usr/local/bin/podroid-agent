@@ -35,6 +35,7 @@ from dataclasses import dataclass
 import requests
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -55,7 +56,28 @@ HISTDIR.mkdir(exist_ok=True)
 MAX_TURNS = 24
 
 console = Console()
-session: PromptSession = PromptSession(history=FileHistory(str(HISTDIR / "history")))
+
+# Enter sends the prompt; trailing `\` switches that one Enter to a
+# newline (and the backslash is stripped so it doesn't ship to the
+# model). Same convention as bash / Claude Code's continuation marker.
+_input_bindings = KeyBindings()
+
+@_input_bindings.add("enter")
+def _enter(event):
+    buf = event.current_buffer
+    cursor_line = buf.document.current_line
+    if cursor_line.endswith("\\"):
+        # Strip the backslash, insert a newline, stay in the buffer.
+        buf.delete_before_cursor(1)
+        buf.insert_text("\n")
+    else:
+        buf.validate_and_handle()
+
+session: PromptSession = PromptSession(
+    history=FileHistory(str(HISTDIR / "history")),
+    multiline=True,
+    key_bindings=_input_bindings,
+)
 
 # cwd is tracked here, NOT in environment, because !bash: starts a new
 # subprocess each call. !bash: cd … doesn't persist; the model is told
@@ -552,7 +574,8 @@ def banner() -> None:
             ("/reset  /save NAME  /load NAME  /stats  /cwd  /exit  ·  Ctrl+D quit\n",
              "dim"),
             ("Multi-line: ", "bold"),
-            ("Esc+Enter sends.", "dim"),
+            ("end a line with \\ to continue on the next line; "
+             "Enter alone sends.", "dim"),
         ),
         border_style="cyan",
     ))
@@ -585,10 +608,7 @@ def main() -> None:
 
     while True:
         try:
-            user = session.prompt(
-                "\npodroid-agent ❯ ",
-                multiline=True,
-            ).strip()
+            user = session.prompt("\npodroid-agent ❯ ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
             return
