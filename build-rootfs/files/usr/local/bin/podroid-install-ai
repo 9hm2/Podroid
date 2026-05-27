@@ -46,20 +46,30 @@ podroid-install-ai — set up local-LLM CLI tools in the VM
 Usage: podroid-install-ai [tool ...]
 
 Tools:
-  aider     AI pair programming, file edit, git-aware  (~50 MB, default)
-  sgpt      shell-gpt: prompt → shell command          (~10 MB, default)
-  all       Both (explicit alias for the default)
+  aider     AI pair programming, file edit, git-aware  (~50 MB)
+  sgpt      shell-gpt: prompt → shell command          (~10 MB)
+  crush     Claude-Code-like agentic TUI (bash + edit) (~15 MB)
+  gptme     Full agent: shell + python + edit + browser (~80 MB)
+  all       Install everything                         (default)
   --help    Show this message
 
 Env:
   PODROID_AI_HOST   Override the llama-server URL
                     (default: http://10.0.2.2:8089 — Android via SLIRP)
 
+Model recommendation for agentic use (crush, gptme, aider tool-loops):
+  Qwen2.5-Coder-7B Q4_0  — code-tuned 7B, follows structured tool-use
+                            reliably. Select in Podroid Settings → AI
+                            Engine → Model. 3B-class models hallucinate
+                            tool calls and loop.
+
 After install, open a new shell or 'source /etc/profile.d/podroid-ai.sh',
 then:
-  aider                        # AI pair programming
-  sgpt "list large files /var" # one-shot prompt
-  podroid-ai "..."             # tiny curl wrapper (already shipped)
+  aider                          # AI pair programming
+  sgpt "list /var/log tail-50"   # one-shot prompt
+  crush                          # interactive TUI agent (Claude-Code-like)
+  gptme "scan the local subnet"  # full agent w/ shell+python tools
+  podroid-ai "..."               # tiny curl wrapper (already shipped)
 EOF
 }
 
@@ -281,7 +291,6 @@ install_sgpt() {
 EOF
         chown -R "$owner" "$rolesdir" 2>/dev/null || true
     done
-    ok "shell-gpt + podroid-shell role installed (use: sgpt --role podroid-shell --repl <name>)"
     # shell-gpt's first run writes ~/.config/shell_gpt/.sgptrc — pre-seed
     # it so the user doesn't get prompted for an OpenAI key on a wholly
     # local install. Different per-home; touch root + existing humans.
@@ -310,7 +319,95 @@ CODE_THEME=dracula
 EOF
         chown "$owner" "$cfg"
     done
-    command -v sgpt >/dev/null 2>&1 && ok "sgpt installed"
+    ok "shell-gpt + podroid-shell role + .sgptrc installed (use: sgpt --role podroid-shell --repl <name>)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Crush — Claude-Code-like agentic TUI. Pre-built Go binary from upstream
+# release, ~15 MB. Chat REPL + bash tool + file edit + memory; works on any
+# OpenAI-compatible endpoint via $OPENAI_BASE_URL or its own config file.
+# ─────────────────────────────────────────────────────────────────────────────
+install_crush() {
+    if command -v crush >/dev/null 2>&1; then
+        ok "crush already installed: $(crush --version 2>/dev/null | head -1)"
+        return
+    fi
+    log "Fetching Crush latest release for linux-arm64"
+    # Resolve the latest tag and arm64 tarball URL from GitHub's releases
+    # API. Tarball naming is `crush_<ver>_Linux_arm64.tar.gz`.
+    local url
+    url=$(curl -fsSL https://api.github.com/repos/charmbracelet/crush/releases/latest \
+            | grep -oE '"browser_download_url": "[^"]*[Ll]inux_arm64\.tar\.gz"' \
+            | head -1 | cut -d'"' -f4)
+    test -n "$url" || { fail "couldn't resolve Crush arm64 release URL"; return 1; }
+    curl -fsSL -o /tmp/crush.tar.gz "$url"
+    tar xzf /tmp/crush.tar.gz -C /tmp
+    install -m 755 /tmp/crush*/crush /usr/local/bin/crush
+    rm -rf /tmp/crush*
+
+    # Pre-seed config — Crush reads $XDG_CONFIG_HOME/crush/config.json or
+    # ~/.config/crush/config.json. Drop the same content into every home
+    # dir so all users start pre-routed at the local server.
+    for h in /etc/skel /root /home/*; do
+        [ -d "$h" ] || continue
+        local cfgdir="$h/.config/crush"
+        local owner=root:root
+        [ "$h" != /etc/skel ] && owner=$(stat -c '%U:%G' "$h" 2>/dev/null) || true
+        install -d -o "${owner%:*}" -g "${owner#*:}" "$cfgdir"
+        cat > "$cfgdir/config.json" <<EOF
+{
+  "providers": {
+    "podroid": {
+      "name": "Podroid Local LLM",
+      "api_base": "$LLAMA_HOST/v1",
+      "api_key": "sk-podroid-local",
+      "type": "openai"
+    }
+  },
+  "models": {
+    "default": {
+      "provider": "podroid",
+      "model": "podroid",
+      "max_tokens": 4096
+    }
+  },
+  "context_paths": [".", "CLAUDE.md", "README.md"]
+}
+EOF
+        chown -R "$owner" "$cfgdir" 2>/dev/null || true
+    done
+    ok "crush installed (use: crush)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gptme — Python agent with the broadest tool set among local-AI CLIs:
+# shell, python eval, file save/patch, browser, vim, IPython, etc. Best
+# Claude-Code-style autonomous behaviour, BUT needs a model that can do
+# tool calls (Qwen2.5-Coder-7B or bigger; 3B hallucinates loops).
+# ─────────────────────────────────────────────────────────────────────────────
+install_gptme() {
+    if command -v gptme >/dev/null 2>&1; then
+        ok "gptme already installed"
+        return
+    fi
+    ensure_uv
+    rm -rf "$PIPX_HOME/venvs/gptme" 2>/dev/null
+    log "Installing gptme via uv with Python 3.12 (~80 MB — many deps)"
+    uv tool install --python 3.12 gptme
+
+    # gptme reads model + endpoint from env vars at runtime, which our
+    # /etc/profile.d/podroid-ai.sh already exports (OPENAI_BASE_URL,
+    # OPENAI_API_KEY). Set GPTME_MODEL too so the CLI uses the right
+    # routing key.
+    grep -q "^export GPTME_MODEL=" "$ENV_FILE" || {
+        cat >> "$ENV_FILE" <<EOF
+
+# gptme uses litellm under the hood — "openai/<model>" routes to the
+# OPENAI_BASE_URL endpoint, which we already point at the local server.
+export GPTME_MODEL="openai/podroid"
+EOF
+    }
+    ok "gptme installed (use: gptme \"prompt here\")"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,9 +427,11 @@ write_aider_conf
 
 for tool in "${TOOLS[@]}"; do
     case "$tool" in
-        all)     install_aider; install_sgpt ;;
+        all)     install_aider; install_sgpt; install_crush; install_gptme ;;
         aider)   install_aider ;;
         sgpt)    install_sgpt ;;
+        crush)   install_crush ;;
+        gptme)   install_gptme ;;
         --help|-h) usage; exit 0 ;;
         *)       fail "Unknown tool: $tool"; usage; exit 1 ;;
     esac
@@ -346,12 +445,19 @@ cat <<'EOF'
   Open a new shell (env vars are auto-sourced) OR run:
     source /etc/profile.d/podroid-ai.sh
 
+  Recommended model for agentic tools (Claude-Code-style use):
+    Podroid app → Settings → AI Engine → Model →
+      Qwen2.5-Coder 7B (~4.4 GB, follows tool-calls reliably)
+    The default 3B is fine for sgpt one-shots but hallucinates
+    tool loops in crush / gptme / aider.
+
   Then try:
     aider                          # AI pair programming, opens repo
-    aider scan.txt notes.md        # bring specific files into context
+    crush                          # Claude-Code-like TUI agent
+    gptme "scan the local subnet"  # full autonomous agent
     sgpt "list /var/log tail-50"   # one-shot prompt
-    sgpt --shell "compress this dir to xz"
-    podroid-ai "explain this nmap output: $(cat scan.txt)"
+    sgpt --role podroid-shell --repl pentest    # pentest REPL
+    podroid-ai "..."               # tiny curl wrapper
 
   Re-run this script anytime to upgrade tools or fix env config —
   it's idempotent.
