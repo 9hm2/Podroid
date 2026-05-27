@@ -54,25 +54,39 @@ SYSTEM = """You are podroid-agent, a shell assistant in a Kali NetHunter VM.
 You can execute commands and read/write files via inline tools.
 
 To call a tool, write a line beginning with !tool: at the start of a line.
+The text after the colon is a raw argument, NEVER a shell pipeline — pipes,
+redirects, &&, and globs go through !bash: only.
+
 Available tools (one per line; never embed in markdown fences):
 
-  !bash: <command>
-      Execute one shell command. You receive stdout+stderr+exit code.
+  !bash: <single shell command line>
+      Run any shell command — pipes/grep/find/redirects all work here.
+      Use this for everything that needs shell features.
+      Example: !bash: ls / | grep -i test
+      Example: !bash: find /etc -name '*.conf' -mtime -7
+      Note: each !bash call is a fresh subprocess, so `cd` doesn't persist.
+      Use absolute paths.
 
-  !ls: <path>
-      List directory contents.
+  !ls: <directory path>
+      List a single directory. Argument MUST be a plain path with no
+      shell syntax. For filtering, use !bash: ls ... | grep ...
+      Example: !ls: /etc
+      Wrong:   !ls: / | grep test       (use !bash: ls / | grep test)
 
-  !read: <path>
-      Cat a file. Returns its contents.
+  !read: <file path>
+      Cat a single file. Plain path only, no shell syntax.
+      Example: !read: /etc/hostname
 
-  !write: <path>
+  !write: <file path>
   ```
   <file content here, may be multi-line until the next ``` fence>
   ```
 
 After every tool call you'll see its output as a user-role message
 prefixed with "tool result:". Continue — call another tool or give a
-plain text answer.
+plain text answer. When something fails, read the error and adapt
+(if the error mentions "No such file" you used a bad path; switch
+to !bash: with the right shell syntax).
 
 VM environment (constant facts — never guess):
 - Hostname: podroid
@@ -282,32 +296,42 @@ def stream_completion(messages: list[dict]) -> str:
         )
 
     usage_payload: dict | None = None
+    stream_error: str | None = None
     with Live(render(), console=console, refresh_per_second=8,
               transient=False, vertical_overflow="visible") as live:
-        for line in r.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                obj = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            # The final usage chunk in OpenAI-compat streams has empty
-            # choices[] and a populated usage{}.
-            if "usage" in obj and obj["usage"]:
-                usage_payload = obj["usage"]
-            choices = obj.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta", {}).get("content", "")
-            if delta:
-                if first_token_at is None:
-                    first_token_at = time.monotonic()
-                    stats.turn_ttfb = first_token_at - t0
-                chunks.append(delta)
-                live.update(render())
+        # Wrap the stream consumption: llama-server occasionally drops
+        # the connection mid-token (OOM kill, watchdog timeout, user
+        # toggle). Don't crash the whole REPL — keep whatever text we
+        # got, surface the error, let the next prompt try again.
+        try:
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                # The final usage chunk in OpenAI-compat streams has empty
+                # choices[] and a populated usage{}.
+                if "usage" in obj and obj["usage"]:
+                    usage_payload = obj["usage"]
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {}).get("content", "")
+                if delta:
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                        stats.turn_ttfb = first_token_at - t0
+                    chunks.append(delta)
+                    live.update(render())
+        except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout) as e:
+            stream_error = f"stream interrupted: {e.__class__.__name__}: {e}"
 
         # Final render + stats commit
         stats.turn_gen_time = time.monotonic() - t0
@@ -320,6 +344,23 @@ def stream_completion(messages: list[dict]) -> str:
         live.update(render())
 
     console.print(turn_footer())
+    if stream_error:
+        # Probe /health so the user sees whether the engine is alive
+        # right now (transient hiccup vs full crash). Quick non-blocking.
+        engine_state = "unknown"
+        try:
+            h = requests.get(ENDPOINT_BASE + "/health", timeout=2)
+            engine_state = ("ok" if h.status_code == 200
+                            else f"{h.status_code} {h.text[:80]}")
+        except Exception as e:
+            engine_state = f"unreachable ({e.__class__.__name__})"
+        console.print(Panel(
+            f"[red]{stream_error}[/red]\n"
+            f"engine /health: {engine_state}\n\n"
+            "[yellow]If the engine is unreachable: phone Notification → Restart "
+            "the AI engine, wait for state Running, then retry the same prompt.[/yellow]",
+            title="[red]engine error[/red]", border_style="red",
+        ))
     return "".join(chunks)
 
 # ── Main REPL ───────────────────────────────────────────────────────────────
