@@ -74,7 +74,12 @@ class AiEngineDetector @Inject constructor(
             batchSize = 2048,        // bumped from 512 — prompt eval throughput
                                      // grows almost linearly with batch on NEON.
             mmap = true,
-            mlock = caps.totalRamGb >= 12,
+            // mlock pins weights + KV in RAM — bad on phone where Android's
+            // low-memory killer competes for the same 12 GB. A 7 B Q4 +
+            // 16 K F16 KV occupies ~6.3 GB; pinning that crashes the
+            // llama-server process mid-session when the user's other apps
+            // need pages. mmap alone is enough — kernel handles paging.
+            mlock = false,
         )
         AiTier.MID -> BackendProfile(
             backend = AiBackend.AUTO,
