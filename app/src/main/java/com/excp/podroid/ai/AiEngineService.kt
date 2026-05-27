@@ -48,6 +48,12 @@ class AiEngineService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private var stateJob: Job? = null
+    // Auto-resume bookkeeping: how many times in a row we've restarted the
+    // engine on its own without a successful Run between attempts. Capped
+    // so a permanently-failing model (e.g. corrupted weights, OOM kill loop)
+    // doesn't burn the battery in a tight restart loop.
+    private var autoResumeAttempts = 0
+    private val maxAutoResume = 3
 
     override fun onCreate() {
         super.onCreate()
@@ -69,12 +75,25 @@ class AiEngineService : Service() {
                 // observer-killed-mid-load case where the VM bounced and
                 // dragged the engine down with it. Settle 500 ms first so
                 // we don't re-launch during a pending Stopping → Idle dance.
-                if (st is AiEngineState.Idle && repository.isEnabled()) {
-                    kotlinx.coroutines.delay(500)
-                    if (process.state.value is AiEngineState.Idle &&
-                        repository.isEnabled() && !process.isRunning) {
-                        Log.i(TAG, "engine fell idle but toggle is still on — auto-resume")
-                        startEngine()
+                // Capped at maxAutoResume retries so a permanently broken
+                // engine doesn't loop forever.
+                if (st is AiEngineState.Running) {
+                    // A successful run resets the failure budget.
+                    autoResumeAttempts = 0
+                } else if (st is AiEngineState.Idle && repository.isEnabled()) {
+                    if (autoResumeAttempts >= maxAutoResume) {
+                        Log.w(TAG, "engine fell idle $autoResumeAttempts× — giving up, user can hit Restart")
+                        // Don't stopSelf — leave the foreground notification
+                        // up with the Restart action so the user can recover
+                        // manually without re-toggling Settings.
+                    } else {
+                        autoResumeAttempts++
+                        kotlinx.coroutines.delay(500L * autoResumeAttempts)  // 0.5/1/1.5s backoff
+                        if (process.state.value is AiEngineState.Idle &&
+                            repository.isEnabled() && !process.isRunning) {
+                            Log.i(TAG, "engine fell idle but toggle is still on — auto-resume #$autoResumeAttempts")
+                            startEngine()
+                        }
                     }
                 } else if (st is AiEngineState.Idle && !repository.isEnabled()) {
                     // Genuine user-off — stop the foreground service so the
