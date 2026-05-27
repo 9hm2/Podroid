@@ -34,16 +34,51 @@ from dataclasses import dataclass
 
 import requests
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from rich.box import Box, ROUNDED
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
+
+# ── Charmtone-inspired palette ──────────────────────────────────────────────
+# Mirrors Crush's "Pantera" dark theme: purple primary, pink accent, cool
+# greens/yellows for success/info, salmon-red for errors. Named to match
+# Crush's Go code so future updates are easy to backport.
+class Style:
+    CHARPLE  = "#8b65f6"   # primary purple
+    DOLLY    = "#ff6bb5"   # accent pink
+    PONY     = "#ff87d7"   # bright pink
+    BLUSH    = "#ffafd7"   # soft pink (focus-tint)
+    BOK      = "#5fd7d7"   # cyan info
+    JULEP    = "#7be88a"   # success green
+    BUTTER   = "#f5e082"   # warning yellow
+    SRIRACHA = "#ff5757"   # error red
+    SMOKE    = "#d0ccd0"   # default fg
+    SQUID    = "#8c8c95"   # secondary fg
+    OYSTER   = "#5c5c66"   # tertiary / dim
+    PEPPER   = "#2a2a33"   # bg accent
+    CHARCOAL = "#1c1c22"   # darkest bg
+
+# Custom Box: vertical bar only on the left, no other borders. Mimics
+# Crush's `lipgloss.Border{Left: "▌"}` focused-message style.
+LEFT_BAR = Box(
+    "    \n"  # top: empty
+    "▌   \n"  # head row
+    "▌   \n"  # head separator
+    "▌   \n"  # row separator
+    "▌   \n"  # row body
+    "▌   \n"  # cross / mid foot
+    "▌   \n"  # bottom separator
+    "    \n", # bottom: empty
+)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 ENDPOINT_BASE = os.environ.get("PODROID_AI_HOST", "http://10.0.2.2:8089").rstrip("/")
@@ -78,6 +113,11 @@ session: PromptSession = PromptSession(
     multiline=True,
     key_bindings=_input_bindings,
 )
+
+def prompt_indicator() -> HTML:
+    """Crush-style `::: ` prompt — pink/magenta, distinctive enough that
+    the user-typed-line is visually separable from the model output."""
+    return HTML(f'\n<style fg="{Style.DOLLY}">::: </style>')
 
 # cwd is tracked here, NOT in environment, because !bash: starts a new
 # subprocess each call. !bash: cd … doesn't persist; the model is told
@@ -346,24 +386,6 @@ def execute_tool(tool: str, args: str, blocks: list[str]) -> str:
     return f"[unknown tool: {tool}]"
 
 # ── Rich rendering helpers ──────────────────────────────────────────────────
-def status_bar() -> Text:
-    """Top status line — keeps cwd + token counts in view at all times."""
-    cw = console.size.width
-    # Compose into two halves; right-align the right half.
-    left = Text()
-    left.append(" podroid-agent ", style="bold reverse cyan")
-    left.append(" ")
-    left.append(MODEL, style="bold")
-    left.append("  cwd=", style="dim")
-    left.append(_short_cwd(), style="white")
-    right = Text()
-    right.append("session ", style="dim")
-    right.append(f"{stats.session_in}↑", style="bold blue")
-    right.append("/", style="dim")
-    right.append(f"{stats.session_out}↓", style="bold green")
-    pad = max(1, cw - left.cell_len - right.cell_len - 2)
-    return Text.assemble(left, Text(" " * pad), right)
-
 def _short_cwd() -> str:
     """Shorten cwd: replace $HOME with ~, cap at 40 chars from the right."""
     s = cwd()
@@ -376,35 +398,133 @@ def _short_cwd() -> str:
         s = "…" + s[-39:]
     return s
 
-def context_bar() -> Panel:
-    used, mx = stats.ctx_used, stats.ctx_max
-    pct = used / mx if mx else 0.0
-    width = max(20, console.size.width - 30)
-    pb = ProgressBar(
-        total=mx, completed=used, width=width,
-        complete_style=("yellow" if pct > 0.7 else "cyan"),
-        finished_style="red",
+def status_line() -> Text:
+    """Status bar shown at the BOTTOM of every live render — Crush
+    positions context info there. Left half: model + cwd; right half:
+    session token counters + context-window %.  Auto-fills the width."""
+    cw = console.size.width
+    ctx_pct = (stats.ctx_used / stats.ctx_max * 100) if stats.ctx_max else 0
+    left = Text()
+    left.append("  ●  ", style=f"bold {Style.DOLLY}")
+    left.append(MODEL, style=f"bold {Style.SMOKE}")
+    left.append("  ", style="")
+    left.append(_short_cwd(), style=Style.SQUID)
+    right = Text()
+    right.append(f"{stats.session_in}↑", style=Style.BOK)
+    right.append("/", style=Style.OYSTER)
+    right.append(f"{stats.session_out}↓", style=Style.JULEP)
+    right.append("   ", style="")
+    right.append(f"ctx {stats.ctx_used}/{stats.ctx_max} ", style=Style.SQUID)
+    bar_color = (Style.JULEP if ctx_pct < 50
+                 else Style.BUTTER if ctx_pct < 80
+                 else Style.SRIRACHA)
+    right.append(f"({ctx_pct:.0f}%)", style=bar_color)
+    pad = max(1, cw - left.cell_len - right.cell_len)
+    return Text.assemble(left, Text(" " * pad), right)
+
+def assistant_render(content: str, streaming: bool) -> Group:
+    """Crush-style assistant block: left bar, bullet header, indented
+    markdown content. No surrounding box — just the vertical accent."""
+    if content:
+        body = Markdown(content, code_theme="dracula")
+    else:
+        body = Spinner("dots", text=Text("thinking…", style=Style.SQUID))
+    # Header bullet
+    header = Text.assemble(
+        ("  ", ""),
+        ("●", f"bold {Style.PONY}"),
+        ("  ", ""),
+        ("assistant", f"bold {Style.SMOKE}"),
+        ("  ·  ", Style.OYSTER),
+        (f"{stats.turn_out} tok", Style.JULEP) if not streaming else
+        ("streaming", Style.SQUID),
     )
-    label = Text(f"  {used:>5}/{mx} tokens · {pct*100:4.1f}%", style="dim")
-    return Panel(
-        Group(pb, label), title="[dim]context window[/dim]",
-        border_style="dim", expand=False, padding=(0, 1),
+    return Group(
+        header,
+        Padding(body, (0, 0, 0, 5)),  # 5-char indent = past the "●  "
     )
 
+def tool_call_render(tool: str, args: str, blocks: list[str]) -> Group:
+    """Compact Crush-style tool call: `→  !tool: args` header in cyan,
+    plus a single fenced block preview for !write / !edit."""
+    head = Text.assemble(
+        ("  ", ""),
+        ("→", f"bold {Style.BOK}"),
+        ("  ", ""),
+        (f"!{tool}: ", f"bold {Style.BOK}"),
+        (args, Style.SMOKE),
+    )
+    pieces = [head]
+    if blocks:
+        for blk in blocks[:2]:
+            preview = blk[:160] + ("…" if len(blk) > 160 else "")
+            pieces.append(Padding(
+                Text(preview, style=Style.SQUID),
+                (0, 0, 0, 5),
+            ))
+    return Group(*pieces)
+
+def tool_result_render(result: str, dt: float) -> Group:
+    """Compact tool result: `←  exit=N (Xs)` header colour-coded by
+    exit code, with indented output below."""
+    # Extract exit code if present
+    exit_code = None
+    body = result
+    if result.startswith("[exit="):
+        end = result.find("]")
+        if end > 0:
+            try:
+                exit_code = int(result[6:end])
+                body = result[end+1:].lstrip("\n")
+            except ValueError:
+                pass
+
+    if exit_code is None:
+        glyph = "←"; glyph_style = f"bold {Style.SQUID}"
+        status = ""
+    elif exit_code == 0:
+        glyph = "✓"; glyph_style = f"bold {Style.JULEP}"
+        status = "ok"
+    else:
+        glyph = "✗"; glyph_style = f"bold {Style.SRIRACHA}"
+        status = f"exit={exit_code}"
+
+    head = Text.assemble(
+        ("  ", ""),
+        (glyph, glyph_style),
+        ("  ", ""),
+        ("result", f"bold {Style.SMOKE}"),
+        ("  ·  ", Style.OYSTER),
+        (status, Style.SQUID) if status else ("", ""),
+        ("  " if status else "", ""),
+        (f"{dt:.2f}s", Style.SQUID),
+    )
+    pieces = [head]
+    if body.strip():
+        display = body if len(body) < 3000 else body[:3000] + "\n…[truncated]"
+        pieces.append(Padding(
+            Text(display, style=Style.SMOKE),
+            (0, 0, 0, 5),
+        ))
+    return Group(*pieces)
+
 def turn_footer() -> Text:
+    """Per-turn metrics line shown after each assistant block. Mirrors
+    Claude Code's compact stats format."""
     if stats.turn_in == 0 and stats.turn_out == 0:
         return Text("")
     rate = stats.turn_out / stats.turn_gen_time if stats.turn_gen_time > 0 else 0
     f = Text()
-    f.append("  Tokens: ", style="dim")
-    f.append(f"{stats.turn_in} sent", style="blue")
-    f.append(", ", style="dim")
-    f.append(f"{stats.turn_out} received", style="green")
-    f.append("  ·  ", style="dim")
-    f.append(f"ttfb {stats.turn_ttfb:.1f}s", style="yellow")
-    f.append("  ·  ", style="dim")
-    f.append(f"{rate:.1f} tok/s", style="magenta")
-    f.append(f"  ·  total {stats.turn_gen_time:.1f}s", style="dim")
+    f.append("  ", "")
+    f.append(f"{stats.turn_in}↑", style=Style.BOK)
+    f.append(" ", "")
+    f.append(f"{stats.turn_out}↓", style=Style.JULEP)
+    f.append("  ·  ", style=Style.OYSTER)
+    f.append(f"ttfb {stats.turn_ttfb:.1f}s", style=Style.BUTTER)
+    f.append("  ·  ", style=Style.OYSTER)
+    f.append(f"{rate:.1f} tok/s", style=Style.PONY)
+    f.append("  ·  ", style=Style.OYSTER)
+    f.append(f"{stats.turn_gen_time:.1f}s total", style=Style.SQUID)
     return f
 
 # ── Initialization warmup ──────────────────────────────────────────────────
@@ -449,15 +569,22 @@ def warmup_engine(system_msg: dict) -> bool:
 
     def panel(elapsed: float) -> Panel:
         spin = Spinner("dots", text=Text.assemble(
-            ("Initializing AI engine — loading model + pre-evaluating system prompt", "bold"),
-            ("\n", ""),
-            ("One-time cost per session. After this completes, your first real prompt\n", "dim"),
-            ("only has to evaluate your own message — usually 5–10 s instead of 60+.\n", "dim"),
-            (f"Endpoint: {ENDPOINT_BASE}    Model: {MODEL}\n", "dim"),
-            (f"Elapsed: {elapsed:.1f}s", "yellow bold"),
+            ("Initializing AI engine — loading model + pre-evaluating system prompt", f"bold {Style.SMOKE}"),
+            ("\n\n", ""),
+            ("One-time cost per session. After this completes, your first real prompt\n", Style.SQUID),
+            ("only has to evaluate your own message — usually 5–10 s instead of 60+.\n\n", Style.SQUID),
+            (f"Endpoint: ", Style.OYSTER), (ENDPOINT_BASE, Style.SMOKE), ("\n", ""),
+            (f"Model:    ", Style.OYSTER), (MODEL, Style.SMOKE), ("\n", ""),
+            (f"Elapsed:  ", Style.OYSTER), (f"{elapsed:.1f}s", f"bold {Style.BUTTER}"),
         ))
-        return Panel(spin, title="[bold cyan]podroid-agent · warming up[/bold cyan]",
-                     border_style="cyan", padding=(1, 2))
+        return Panel(
+            spin,
+            title=Text.assemble(
+                ("●  ", f"bold {Style.PONY}"),
+                ("warming up", f"bold {Style.DOLLY}"),
+            ),
+            border_style=Style.CHARPLE, box=ROUNDED, padding=(1, 2),
+        )
 
     with Live(panel(0.0), refresh_per_second=4, transient=True) as live:
         while not result["done"]:
@@ -466,27 +593,28 @@ def warmup_engine(system_msg: dict) -> bool:
         live.update(panel(time.monotonic() - t0))
 
     if result["ok"]:
-        # Surface what the warmup cost so the user sees that the eventual
-        # "slow" first prompt was actually the very fastest possible.
         elapsed = time.monotonic() - t0
         stats.ctx_used = result["tokens_in"] + result["tokens_out"]
-        console.print(Panel.fit(
+        console.print(Padding(
             Text.assemble(
-                ("✓ Engine ready — ", "bold green"),
-                (f"loaded in {elapsed:.1f}s. ", "green"),
-                ("Subsequent turns will reuse the warm model.", "dim"),
+                ("  ", ""),
+                ("✓", f"bold {Style.JULEP}"),
+                ("  Engine ready  ", f"bold {Style.SMOKE}"),
+                ("·  ", Style.OYSTER),
+                (f"loaded in {elapsed:.1f}s", Style.SQUID),
             ),
-            border_style="green",
+            (1, 0),
         ))
         return True
     console.print(Panel(
         Text.assemble(
-            ("✗ Engine warmup failed.\n", "bold red"),
-            (result["err"] or "(unknown)", "red"),
+            ("✗ Engine warmup failed.\n", f"bold {Style.SRIRACHA}"),
+            (result["err"] or "(unknown)", Style.SRIRACHA),
             ("\n\nOn the phone:  Settings → AI Engine → Enable engine → wait for "
-             "state Running → re-run podroid-agent.\n", "yellow"),
+             "state Running → re-run podroid-agent.\n", Style.BUTTER),
         ),
-        title="[red]initialization error[/red]", border_style="red",
+        title=Text("✗ initialization error", style=f"bold {Style.SRIRACHA}"),
+        border_style=Style.SRIRACHA, box=ROUNDED,
     ))
     return False
 
@@ -549,18 +677,10 @@ def stream_completion(messages: list[dict]) -> str:
         return ""
 
     def render() -> Group:
-        if chunks:
-            body_render = Markdown("".join(chunks))
-        else:
-            body_render = Spinner("dots", text=Text(
-                "  thinking…", style="dim italic",
-            ))
         return Group(
-            status_bar(),
-            Panel(body_render,
-                  title="[bold green]assistant[/bold green]",
-                  border_style="green", padding=(0, 1), expand=True),
-            context_bar(),
+            assistant_render("".join(chunks), streaming=True),
+            Text(""),
+            status_line(),
         )
 
     usage_payload: dict | None = None
@@ -636,22 +756,33 @@ def stream_completion(messages: list[dict]) -> str:
 
 # ── REPL ────────────────────────────────────────────────────────────────────
 def banner() -> None:
+    """Crush-style launch banner — wordmark + endpoint info + key hints,
+    rounded magenta border."""
     console.print(Panel.fit(
         Text.assemble(
-            ("podroid-agent", "bold cyan"),
-            ("\nLocal-LLM agent · Claude-Code-style UX for Podroid\n", "dim"),
-            (f"  Endpoint   ", "dim"), (ENDPOINT_BASE, "white"), ("\n", ""),
-            (f"  Model      ", "dim"), (MODEL, "white"), ("\n", ""),
-            (f"  Context    ", "dim"), (f"{stats.ctx_max} tokens\n", "white"),
-            (f"  Working in ", "dim"), (cwd(), "white"), ("\n\n", ""),
-            ("Commands: ", "bold"),
+            ("  ", ""),
+            ("●", f"bold {Style.PONY}"),
+            ("  ", ""),
+            ("podroid-agent", f"bold {Style.DOLLY}"),
+            ("\n", ""),
+            ("  ", ""),
+            ("local-LLM agent for Podroid — Crush-style UX\n", Style.SQUID),
+            ("\n", ""),
+            (f"  Endpoint   ", Style.OYSTER), (ENDPOINT_BASE, Style.SMOKE), ("\n", ""),
+            (f"  Model      ", Style.OYSTER), (MODEL, Style.SMOKE), ("\n", ""),
+            (f"  Context    ", Style.OYSTER), (f"{stats.ctx_max} tokens\n", Style.SMOKE),
+            (f"  Working in ", Style.OYSTER), (cwd(), Style.SMOKE), ("\n\n", ""),
+            ("  ", ""),
+            ("Commands  ", f"bold {Style.BLUSH}"),
             ("/reset  /save NAME  /load NAME  /stats  /cwd  /exit  ·  Ctrl+D quit\n",
-             "dim"),
-            ("Multi-line: ", "bold"),
-            ("end a line with \\ to continue on the next line; "
-             "Enter alone sends.", "dim"),
+             Style.SQUID),
+            ("  ", ""),
+            ("Multi-line ", f"bold {Style.BLUSH}"),
+            ("end a line with \\ to continue;  Enter sends.", Style.SQUID),
         ),
-        border_style="cyan",
+        border_style=Style.CHARPLE,
+        box=ROUNDED,
+        padding=(0, 1),
     ))
 
 def show_stats() -> None:
@@ -685,7 +816,7 @@ def main() -> None:
 
     while True:
         try:
-            user = session.prompt("\npodroid-agent ❯ ").strip()
+            user = session.prompt(prompt_indicator()).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
             return
@@ -736,26 +867,11 @@ def main() -> None:
             if not parsed:
                 break
             tool, args, blocks = parsed
-            preview = f"!{tool}: {args}"
-            if blocks:
-                first = blocks[0][:200] + ("…" if len(blocks[0]) > 200 else "")
-                preview += f"\n```\n{first}\n```"
-                if len(blocks) > 1:
-                    second = blocks[1][:200] + ("…" if len(blocks[1]) > 200 else "")
-                    preview += f"\n```\n{second}\n```"
-            console.print(Panel(
-                preview, title="[cyan]▶ tool call[/cyan]",
-                border_style="cyan", expand=False,
-            ))
+            console.print(tool_call_render(tool, args, blocks))
             t_tool = time.monotonic()
             result = execute_tool(tool, args, blocks)
             tool_dt = time.monotonic() - t_tool
-            display = result[:4000] + ("\n…[truncated]" if len(result) > 4000 else "")
-            console.print(Panel(
-                display,
-                title=f"[green]◀ tool result · {tool_dt:.2f}s[/green]",
-                border_style="green", expand=False,
-            ))
+            console.print(tool_result_render(result, tool_dt))
             messages.append({"role": "user",
                              "content": f"[OUTPUT]\n{result}"})
 
