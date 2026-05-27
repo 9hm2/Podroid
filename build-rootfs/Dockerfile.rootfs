@@ -61,7 +61,7 @@ RUN set -e; \
         if debootstrap --arch=arm64 --foreign --variant=minbase \
                 --keyring=/work/kali-archive-keyring.gpg \
                 --components=main,contrib,non-free,non-free-firmware \
-                --include=systemd-sysv,udev,dbus,libpam-systemd,kali-archive-keyring,ca-certificates,openssh-server,sudo,iproute2,iputils-ping,net-tools,isc-dhcp-client,iw,wireless-tools,rfkill,wpasupplicant,aircrack-ng,usbutils,pciutils,kmod,bash-completion,less,nano,tmux,screen,gpsd,tigervnc-standalone-server,tigervnc-common,pulseaudio,pulseaudio-utils,curl,jq,python3-pip,python3-venv,pipx,git \
+                --include=systemd-sysv,udev,dbus,libpam-systemd,kali-archive-keyring,ca-certificates,openssh-server,sudo,iproute2,iputils-ping,net-tools,isc-dhcp-client,iw,wireless-tools,rfkill,wpasupplicant,aircrack-ng,usbutils,pciutils,kmod,bash-completion,less,nano,tmux,screen,gpsd,tigervnc-standalone-server,tigervnc-common,pulseaudio,pulseaudio-utils \
                 ${KALI_SUITE} /work/rootfs ${KALI_MIRROR}; then \
             echo "=== debootstrap succeeded on attempt $attempt ==="; \
             break; \

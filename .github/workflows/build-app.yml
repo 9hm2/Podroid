@@ -1,19 +1,15 @@
 name: Build app
 
 # Manually-triggered build of the full Podroid app. Cross-compiles the kernel,
-# Kali rootfs, QEMU and the on-device llama.cpp AI engine in parallel jobs,
-# then assembles the APK in a final job that downloads each artifact.
+# Kali rootfs and QEMU in parallel jobs, then assembles the APK in a final
+# job that downloads each artifact.
 #
 # Wall-clock budget on ubuntu-latest:
 #   - kernel+initramfs : ~15 min  (Docker layer-cached)
 #   - rootfs (Kali)    : ~5 min   (debootstrap cached)
 #   - qemu             : ~25 min  first run, ~3 min cached
-#   - ai (llama.cpp)   : ~10 min  first run, ~2 min cached
 #   - apk              : ~5 min
 # Parallel = ~25 min wall-clock first run, ~10 min cached.
-#
-# Buildx GHA cache (`type=gha,scope=...`) persists Docker layers across runs
-# so a green first run keeps the second under 15 minutes total.
 
 on:
   workflow_dispatch:
@@ -126,40 +122,10 @@ jobs:
           path: app/src/main/assets/qemu/
           if-no-files-found: error
 
-  ai:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Soft-fail: if the llama.cpp upstream pin breaks, the apk job still
-    # ships — the app handles missing libllama-server.so by disabling the
-    # AI engine toggle with a clear error in the Settings panel. Easier
-    # to land a working APK and fix the AI build incrementally than to
-    # gate the whole release on it.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with: { ref: "${{ inputs.branch }}" }
-      - run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-      - uses: docker/setup-buildx-action@v3
-      - if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build llama-server (Vulkan + CPU/NEON)
-        run: ./build-all.sh ai
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jnilibs-ai
-          path: app/src/main/jniLibs/arm64-v8a/libllama-server.so
-          if-no-files-found: warn
-
   # ── Final APK assembly job ────────────────────────────────────────────────
 
   apk:
-    needs: [initramfs, rootfs, qemu, ai]
-    if: always() && needs.initramfs.result == 'success' && needs.rootfs.result == 'success' && needs.qemu.result == 'success'
+    needs: [initramfs, rootfs, qemu]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -171,9 +137,8 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      # Download every artifact into the right place. The AI artifact is
-      # optional — if its job failed, we skip the download and ship without
-      # the llama-server binary. The Settings panel surfaces this clearly.
+      # Download every artifact produced by the parallel builders into the
+      # tree positions Gradle expects.
       - name: Download kernel + initramfs assets
         uses: actions/download-artifact@v4
         with:
@@ -194,20 +159,6 @@ jobs:
         with:
           name: assets-qemu
           path: app/src/main/assets/qemu
-      - name: Download AI jniLibs (optional)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: jnilibs-ai
-          path: app/src/main/jniLibs/arm64-v8a
-
-      - name: Report AI engine inclusion
-        run: |
-          if [ -f app/src/main/jniLibs/arm64-v8a/libllama-server.so ]; then
-            echo "✓ libllama-server.so included ($(du -h app/src/main/jniLibs/arm64-v8a/libllama-server.so | cut -f1))"
-          else
-            echo "⚠ libllama-server.so missing — APK will ship without AI engine"
-          fi
 
       - name: Decode release keystore
         if: inputs.build_type == 'release'

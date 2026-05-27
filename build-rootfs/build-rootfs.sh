@@ -129,23 +129,7 @@ RDY
 # --- resize daemon + winsize-restoring login wrapper (reused as-is) ---------
 cp /work/files/usr/local/bin/podroid-resize "$ROOTFS/usr/local/sbin/podroid-resize"
 cp /work/files/usr/local/bin/podroid-login  "$ROOTFS/usr/local/bin/podroid-login"
-# podroid-ai: VM-side curl wrapper that hits the Android llama-server over
-# SLIRP loopback (10.0.2.2). Depends on curl + jq (in --include).
-cp /work/files/usr/local/bin/podroid-ai     "$ROOTFS/usr/local/bin/podroid-ai"
-# podroid-install-ai: idempotent installer for Aider + shell-gpt; the user
-# runs it once with `sudo podroid-install-ai` after the engine is up. Not
-# auto-run at first boot — that would slow boot + need network at first
-# login; an explicit `sudo` keeps the failure mode obvious.
-cp /work/files/usr/local/bin/podroid-install-ai "$ROOTFS/usr/local/bin/podroid-install-ai"
-# podroid-agent: minimal Python-based agent (Crush-style UX, ~500-token
-# system prompt) bundled directly so it works on every fresh VM without
-# downloading anything.
-cp /work/files/usr/local/bin/podroid-agent      "$ROOTFS/usr/local/bin/podroid-agent"
-chmod +x "$ROOTFS/usr/local/sbin/podroid-"* \
-         "$ROOTFS/usr/local/bin/podroid-login" \
-         "$ROOTFS/usr/local/bin/podroid-ai" \
-         "$ROOTFS/usr/local/bin/podroid-install-ai" \
-         "$ROOTFS/usr/local/bin/podroid-agent"
+chmod +x "$ROOTFS/usr/local/sbin/podroid-"* "$ROOTFS/usr/local/bin/podroid-login"
 
 # --- systemd units ----------------------------------------------------------
 cat > "$ROOTFS/etc/systemd/system/podroid-bootstrap.service" <<'EOF'
@@ -275,7 +259,6 @@ Kernel \r on \m (\l)
   Default login:  root / kali
   Install tools:  apt update && apt install <pkg>
   Full toolset:   apt install kali-linux-default
-  AI assistants:  sudo podroid-install-ai   (Aider, shell-gpt, podroid-ai)
 
 EOF
 

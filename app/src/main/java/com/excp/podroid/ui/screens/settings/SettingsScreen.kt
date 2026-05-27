@@ -368,9 +368,6 @@ fun SettingsScreen(
                     )
                 }
 
-                // ── AI ENGINE ─────────────────────────────────────────
-                AiEngineSection()
-
                 // ── ABOUT ─────────────────────────────────────────────
                 PodroidSectionLabel("About")
                 PodroidListRow(label = "Version", value = "v${BuildConfig.VERSION_NAME}", mono = true)

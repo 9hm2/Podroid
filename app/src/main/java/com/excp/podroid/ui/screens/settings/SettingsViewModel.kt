@@ -64,7 +64,6 @@ class SettingsViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val portForwardRepository: PortForwardRepository,
     private val engine: VmEngine,
-    private val llamaProcess: com.excp.podroid.ai.LlamaServerProcess,
 ) : ViewModel() {
 
     val vmRamMb: StateFlow<Int> = settingsRepository.vmRamMb
@@ -389,24 +388,6 @@ class SettingsViewModel @Inject constructor(
 
             appendLine("=== App Logcat (this process) ===")
             append(captureAppLogcat())
-            appendLine()
-
-            appendLine("=== AI Engine ===")
-            val aiBin = File(context.applicationInfo.nativeLibraryDir, "libllama-server.so")
-            appendLine("libllama-server.so: ${if (aiBin.exists()) "${aiBin.length() / 1024} KiB present" else "MISSING (workflow ai job soft-failed)"}")
-            appendLine("state: ${llamaProcess.state.value}")
-            val aiLog = llamaProcess.logFile
-            if (aiLog.exists() && aiLog.length() > 0) {
-                val text = aiLog.readText()
-                // Last ~80 lines is enough to see the boot banner + the error
-                // that killed llama-server; full log would balloon the export.
-                val lines = text.lines()
-                val tail = if (lines.size > 80) lines.takeLast(80) else lines
-                appendLine("log (last ${tail.size} lines):")
-                appendLine(tail.joinToString("\n"))
-            } else {
-                appendLine("log: (none — engine has not been started this session)")
-            }
             appendLine()
 
             appendLine("=== VM Console Log (backend=${activeBackendId()}) ===")
