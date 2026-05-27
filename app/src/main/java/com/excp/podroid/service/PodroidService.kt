@@ -291,15 +291,34 @@ class PodroidService : Service() {
      *  engine — keeping it running with no VM consumer would just hold
      *  ~2 GB of model in RAM for nothing. Only attached when the user
      *  flipped the toggle on in Settings; manual start/stop from the
-     *  Settings panel still works without this observer. */
+     *  Settings panel still works without this observer.
+     *
+     *  Debounced: a short Stopped/Idle blip between two Running states
+     *  (engine restart, boot-stage transition) shouldn't tear the AI
+     *  process down mid-model-load — pause() only fires after the VM
+     *  has stayed non-Running for 2 seconds. Saves a SIGTERM cascade
+     *  that turns a 30-second 7B-model load into 90 seconds of restart
+     *  loops. */
     private suspend fun observeStateForAi() {
+        var pauseJob: kotlinx.coroutines.Job? = null
         engine.state.collect { state ->
             when (state) {
-                is VmState.Running -> com.excp.podroid.ai.AiEngineService.start(this@PodroidService)
-                is VmState.Stopped, is VmState.Idle, is VmState.Error ->
-                    // pause() not stop() — keep the persisted enable flag on
-                    // so the next VM-start auto-resumes the engine.
-                    com.excp.podroid.ai.AiEngineService.pause(this@PodroidService)
+                is VmState.Running -> {
+                    // Cancel any pending pause — the VM came back before
+                    // we got around to killing the engine.
+                    pauseJob?.cancel()
+                    pauseJob = null
+                    com.excp.podroid.ai.AiEngineService.start(this@PodroidService)
+                }
+                is VmState.Stopped, is VmState.Idle, is VmState.Error -> {
+                    // Defer the pause: if VM bounces back to Running within
+                    // 2 s, the cancel above swallows it.
+                    pauseJob?.cancel()
+                    pauseJob = serviceScope.launch {
+                        kotlinx.coroutines.delay(2_000)
+                        com.excp.podroid.ai.AiEngineService.pause(this@PodroidService)
+                    }
+                }
                 else -> {}
             }
         }

@@ -64,10 +64,21 @@ class AiEngineService : Service() {
                 }
                 getSystemService(NotificationManager::class.java)
                     .notify(NOTIF_ID, buildNotification(text))
-                // Stop the service once the process has been Idle for a tick
-                // and the user toggled it off (covers process crash and
-                // user-initiated stop).
-                if (st is AiEngineState.Idle && !repository.isEnabled()) {
+                // If the engine fell into Idle while the user still wants
+                // it on (enabled=true), auto-resume — this catches the
+                // observer-killed-mid-load case where the VM bounced and
+                // dragged the engine down with it. Settle 500 ms first so
+                // we don't re-launch during a pending Stopping → Idle dance.
+                if (st is AiEngineState.Idle && repository.isEnabled()) {
+                    kotlinx.coroutines.delay(500)
+                    if (process.state.value is AiEngineState.Idle &&
+                        repository.isEnabled() && !process.isRunning) {
+                        Log.i(TAG, "engine fell idle but toggle is still on — auto-resume")
+                        startEngine()
+                    }
+                } else if (st is AiEngineState.Idle && !repository.isEnabled()) {
+                    // Genuine user-off — stop the foreground service so the
+                    // notification dismisses.
                     stopSelf()
                 }
             }
