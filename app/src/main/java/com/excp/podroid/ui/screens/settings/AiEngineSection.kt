@@ -277,7 +277,7 @@ fun AiEngineSection(vm: AiEngineSettingsViewModel = hiltViewModel()) {
     )
     SettingChipRow(
         label = "Context size",
-        options = listOf(1024, 2048, 4096, 8192).map { it to "$it tokens" },
+        options = listOf(1024, 2048, 4096, 8192, 16384, 32768).map { it to "$it tokens" },
         selected = p.contextSize,
         onSelect = vm::setContextSize,
     )

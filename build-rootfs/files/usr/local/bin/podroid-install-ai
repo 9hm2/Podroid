@@ -367,7 +367,7 @@ install_crush() {
         {
           "id": "podroid",
           "name": "Podroid Local LLM",
-          "context_window": 8192,
+          "context_window": 16384,
           "default_max_tokens": 2048
         }
       ]

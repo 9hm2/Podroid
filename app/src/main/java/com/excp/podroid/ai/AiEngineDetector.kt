@@ -63,9 +63,12 @@ class AiEngineDetector @Inject constructor(
         AiTier.HIGH -> BackendProfile(
             backend = AiBackend.AUTO,
             modelId = "qwen2.5-3b-q4",
-            contextSize = 4096,
-            gpuLayers = -1,         // all on GPU when Vulkan picks
-            threads = -1,           // big-cores-only
+            // Bumped from 4096 → 16384 so Crush / gptme's ~9 KB tool-
+            // prompt fits with room for response. Qwen2.5 family supports
+            // 32K native, KV cache stays under 5 GB at 16K with F16.
+            contextSize = 16384,
+            gpuLayers = -1,
+            threads = -1,
             flashAttention = true,
             kvCacheType = KvCacheType.F16,
             batchSize = 512,
@@ -75,7 +78,8 @@ class AiEngineDetector @Inject constructor(
         AiTier.MID -> BackendProfile(
             backend = AiBackend.AUTO,
             modelId = "tinyllama-1.1b-q4",
-            contextSize = 2048,
+            contextSize = 8192,    // up from 2048 — TinyLlama's native is 2K but
+                                   // Qwen models the user might pick handle more.
             gpuLayers = -1,
             threads = -1,
             flashAttention = true,
@@ -87,7 +91,7 @@ class AiEngineDetector @Inject constructor(
         AiTier.LOW -> BackendProfile(
             backend = AiBackend.CPU,
             modelId = "qwen2.5-0.5b-q4",
-            contextSize = 1024,
+            contextSize = 4096,    // up from 1024 — Qwen 0.5B is 32K-capable.
             gpuLayers = 0,
             threads = 4,
             flashAttention = false,
