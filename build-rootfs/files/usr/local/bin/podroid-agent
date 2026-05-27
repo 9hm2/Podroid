@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""
+podroid-agent — minimal Crush-style agent for local LLMs on Podroid.
+
+Conversational REPL with bash / read / write / ls tools, plus rich
+markdown rendering. The whole system prompt is ~500 tokens (vs
+Crush's ~9k) so it fits inside any reasonable context window on a
+phone-class CPU model.
+
+Tool calls are inline lines starting with `!tool:` — the model writes
+them as part of its reply, we parse + execute + feed results back.
+No JSON-schema tool API gymnastics, no MCP, no sub-agents. Reliable
+on 3 B / 7 B Q4 models that struggle with structured function-calling.
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+import requests
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.syntax import Syntax
+
+# ── Config ──────────────────────────────────────────────────────────────────
+ENDPOINT = os.environ.get(
+    "PODROID_AI_HOST", "http://10.0.2.2:8089"
+).rstrip("/") + "/v1/chat/completions"
+MODEL = os.environ.get("OPENAI_MODEL_NAME", "podroid")
+HISTDIR = pathlib.Path.home() / ".podroid-agent"
+HISTDIR.mkdir(exist_ok=True)
+MAX_TURNS = 24  # trim context after this many turns
+
+SYSTEM = """You are podroid-agent, a shell assistant in a Kali NetHunter VM.
+You can execute commands and read/write files via inline tools.
+
+To call a tool, write a line beginning with !tool: at the start of a line.
+Available tools (one per line; never embed in markdown fences):
+
+  !bash: <command>
+      Execute one shell command. You receive stdout+stderr+exit code.
+
+  !ls: <path>
+      List directory contents. Use this before bash for navigation.
+
+  !read: <path>
+      Cat a file. Returns its contents.
+
+  !write: <path>
+  ```
+  <file content here, may be multi-line until the next ``` fence>
+  ```
+
+After every tool call you'll see its output as a user-role message
+prefixed with "tool result:". Continue the conversation — call another
+tool or give a plain text answer.
+
+VM environment (constant facts — never guess):
+- Hostname: podroid
+- Primary iface: enp0s3 / 10.0.2.15/24 / gateway 10.0.2.2 (= the Android host)
+- Subnet: 10.0.2.0/24. NEVER use 192.168.x.x — wrong network.
+- USB-passthrough Wi-Fi shows up as wlan0/wlan1 when plugged in.
+- Kali rolling, full apt access. nmap, aircrack-ng, wireshark already there.
+- /mnt/android is a 9p share to the phone's /storage/emulated/0/Download dir.
+
+Be concise. Prefer one tool call at a time so you can react to its output.
+"""
+
+console = Console()
+session: PromptSession = PromptSession(history=FileHistory(str(HISTDIR / "history")))
+
+# ── Tool implementations ────────────────────────────────────────────────────
+def run_bash(cmd: str) -> str:
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, executable="/bin/bash",
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return "[timeout after 120s]"
+    out = proc.stdout
+    if proc.stderr:
+        out += ("\n" if out else "") + proc.stderr
+    return f"[exit={proc.returncode}]\n{out}".rstrip()
+
+def run_ls(path: str) -> str:
+    path = path.strip() or "."
+    try:
+        items = sorted(os.listdir(path))
+    except OSError as e:
+        return f"[error: {e}]"
+    return "\n".join(items) if items else "[empty]"
+
+def run_read(path: str) -> str:
+    try:
+        with open(path.strip(), "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(64 * 1024)  # cap at 64 KiB to keep context sane
+        return content
+    except OSError as e:
+        return f"[error: {e}]"
+
+def run_write(path: str, content: str) -> str:
+    try:
+        path_obj = pathlib.Path(path.strip())
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        path_obj.write_text(content)
+        return f"[wrote {len(content)} bytes to {path}]"
+    except OSError as e:
+        return f"[error: {e}]"
+
+# ── Tool-call parser ────────────────────────────────────────────────────────
+# Each match yields a (tool_name, args) tuple. Multi-line !write: blocks are
+# captured by the trailing ```fence so the model can include line breaks.
+TOOL_RE = re.compile(
+    r"^!(bash|ls|read|write):\s*(.*)$",
+    re.MULTILINE,
+)
+
+def parse_first_tool(text: str) -> tuple[str, str, str] | None:
+    """Return (tool, args, remainder_after_block) for the FIRST tool call
+    in text, or None if none. For !write: also strips the ```…``` fence."""
+    m = TOOL_RE.search(text)
+    if not m:
+        return None
+    tool, args = m.group(1), m.group(2).strip()
+    if tool == "write":
+        # Look for a fenced block right after the !write: line.
+        after = text[m.end():]
+        fence = re.search(r"```\n(.*?)\n```", after, re.DOTALL)
+        if fence:
+            return tool, args, fence.group(1)
+    return tool, args, ""
+
+def execute_tool(tool: str, args: str, body: str) -> str:
+    if tool == "bash":  return run_bash(args)
+    if tool == "ls":    return run_ls(args)
+    if tool == "read":  return run_read(args)
+    if tool == "write": return run_write(args, body)
+    return f"[unknown tool: {tool}]"
+
+# ── LLM streaming ───────────────────────────────────────────────────────────
+def stream_completion(messages: list[dict]) -> str:
+    """Stream a single completion, printing tokens as they arrive. Returns
+    the full assistant message."""
+    body = {
+        "model": MODEL,
+        "stream": True,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }
+    try:
+        r = requests.post(ENDPOINT, json=body, stream=True, timeout=300)
+    except requests.exceptions.ConnectionError as e:
+        console.print(f"[red]✗ Engine unreachable: {e}[/red]")
+        console.print(
+            "[yellow]On the phone: Settings → AI Engine → Enable engine, "
+            "wait for state Running, then retry.[/yellow]"
+        )
+        return ""
+    if r.status_code != 200:
+        console.print(f"[red]✗ HTTP {r.status_code}: {r.text[:200]}[/red]")
+        return ""
+
+    chunks: list[str] = []
+    for line in r.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            delta = json.loads(data)["choices"][0]["delta"].get("content", "")
+        except (KeyError, IndexError, json.JSONDecodeError):
+            continue
+        if delta:
+            chunks.append(delta)
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+    print()
+    return "".join(chunks)
+
+# ── Main REPL ───────────────────────────────────────────────────────────────
+def main() -> None:
+    console.rule(
+        "[bold cyan]podroid-agent[/] · endpoint=" + ENDPOINT + " · model=" + MODEL
+    )
+    console.print(
+        "[dim]Commands: /reset clear history · /save NAME · /load NAME · "
+        "/exit · Ctrl+D quit[/dim]"
+    )
+    messages: list[dict] = [{"role": "system", "content": SYSTEM}]
+
+    while True:
+        try:
+            user = session.prompt("\npodroid-agent ❯ ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]bye[/dim]")
+            return
+
+        if not user:
+            continue
+        if user in ("/exit", "/quit"):
+            return
+        if user == "/reset":
+            messages = [messages[0]]
+            console.print("[dim](history cleared)[/dim]")
+            continue
+        if user.startswith("/save "):
+            name = user[6:].strip() or "default"
+            (HISTDIR / f"{name}.json").write_text(json.dumps(messages, indent=2))
+            console.print(f"[dim](saved as {name})[/dim]")
+            continue
+        if user.startswith("/load "):
+            name = user[6:].strip() or "default"
+            path = HISTDIR / f"{name}.json"
+            if not path.exists():
+                console.print(f"[red](no saved session: {name})[/red]")
+                continue
+            messages = json.loads(path.read_text())
+            console.print(f"[dim](loaded {name}, {len(messages)} turns)[/dim]")
+            continue
+
+        messages.append({"role": "user", "content": user})
+
+        # Tool-call loop: keep generating + executing until the model
+        # produces a plain-text reply with no tool calls.
+        for _ in range(8):  # max 8 tool calls per turn — runaway guard
+            reply = stream_completion(messages)
+            if not reply:
+                break
+            messages.append({"role": "assistant", "content": reply})
+
+            parsed = parse_first_tool(reply)
+            if not parsed:
+                break
+            tool, args, body = parsed
+            console.print(Panel(f"!{tool}: {args}",
+                                title="[cyan]tool call[/cyan]",
+                                border_style="cyan", expand=False))
+            result = execute_tool(tool, args, body)
+            console.print(Panel(result[:4000] + ("\n…[truncated]" if len(result) > 4000 else ""),
+                                title="[green]tool result[/green]",
+                                border_style="green", expand=False))
+            # Feed the result back as a user message — the simplest way
+            # that small models reliably understand. Schema-correct tool
+            # messages confuse them at 3 B–7 B Q4.
+            messages.append({"role": "user", "content": f"tool result:\n{result}"})
+
+        # Trim history to keep context small. Keep system + last 2*MAX_TURNS
+        # messages (one user + one assistant per turn ≈ 2 messages).
+        if len(messages) > 2 * MAX_TURNS + 1:
+            messages = [messages[0]] + messages[-2 * MAX_TURNS:]
+
+
+if __name__ == "__main__":
+    main()

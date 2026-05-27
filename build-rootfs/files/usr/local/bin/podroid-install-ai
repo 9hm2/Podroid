@@ -50,6 +50,8 @@ Tools:
   sgpt      shell-gpt: prompt → shell command          (~10 MB)
   crush     Claude-Code-like agentic TUI (bash + edit) (~15 MB)
   gptme     Full agent: shell + python + edit + browser (~80 MB)
+  agent     podroid-agent — minimal Crush-style script (~500-token
+            system prompt; ideal for small models on phone CPU)
   all       Install everything                         (default)
   --help    Show this message
 
@@ -422,6 +424,39 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# podroid-agent — bundled Python script. Tiny system prompt (~500 tok)
+# vs Crush's ~9 K and gptme's ~3 K. Designed to actually work on the
+# phone-CPU Qwen2.5-Coder-3B without context blowouts. Already shipped
+# in the rootfs squashfs at /usr/local/bin/podroid-agent — this step
+# just ensures pip deps are present and the binary is executable.
+# ─────────────────────────────────────────────────────────────────────────────
+install_podroid_agent() {
+    if [ ! -f /usr/local/bin/podroid-agent ]; then
+        fail "podroid-agent script missing — re-extract the squashfs or fetch"
+        fail "  curl -fsSL https://raw.githubusercontent.com/9hm2/Podroid/kali-nethunter/build-rootfs/files/usr/local/bin/podroid-agent"
+        fail "    -o /usr/local/bin/podroid-agent && chmod +x /usr/local/bin/podroid-agent"
+        return 1
+    fi
+    chmod +x /usr/local/bin/podroid-agent
+    ensure_uv
+    # rich + prompt_toolkit + requests — same deps as podroid-chat, none
+    # of which need numpy so a system pip is fine here. Use --break-
+    # system-packages because Kali rolling marks the system Python as
+    # externally-managed; we trust ourselves with /usr/local/lib.
+    DEBIAN_FRONTEND=noninteractive pip3 install --break-system-packages --quiet \
+        rich prompt_toolkit requests 2>/dev/null || {
+        warn "pip install fell back — trying via uv tool"
+        uv tool install --python 3.12 --with rich,prompt_toolkit,requests pip >/dev/null 2>&1 || true
+    }
+    if /usr/local/bin/podroid-agent --help >/dev/null 2>&1 || \
+       python3 -c "import rich, prompt_toolkit, requests" 2>/dev/null; then
+        ok "podroid-agent ready (use: podroid-agent)"
+    else
+        warn "podroid-agent installed but Python deps may be missing — try: pip3 install --break-system-packages rich prompt_toolkit requests"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 TOOLS=("$@")
@@ -438,11 +473,12 @@ write_aider_conf
 
 for tool in "${TOOLS[@]}"; do
     case "$tool" in
-        all)     install_aider; install_sgpt; install_crush; install_gptme ;;
+        all)     install_aider; install_sgpt; install_crush; install_gptme; install_podroid_agent ;;
         aider)   install_aider ;;
         sgpt)    install_sgpt ;;
         crush)   install_crush ;;
         gptme)   install_gptme ;;
+        agent|podroid-agent) install_podroid_agent ;;
         --help|-h) usage; exit 0 ;;
         *)       fail "Unknown tool: $tool"; usage; exit 1 ;;
     esac

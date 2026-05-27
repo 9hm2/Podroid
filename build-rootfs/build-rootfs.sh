@@ -137,10 +137,15 @@ cp /work/files/usr/local/bin/podroid-ai     "$ROOTFS/usr/local/bin/podroid-ai"
 # auto-run at first boot — that would slow boot + need network at first
 # login; an explicit `sudo` keeps the failure mode obvious.
 cp /work/files/usr/local/bin/podroid-install-ai "$ROOTFS/usr/local/bin/podroid-install-ai"
+# podroid-agent: minimal Python-based agent (Crush-style UX, ~500-token
+# system prompt) bundled directly so it works on every fresh VM without
+# downloading anything.
+cp /work/files/usr/local/bin/podroid-agent      "$ROOTFS/usr/local/bin/podroid-agent"
 chmod +x "$ROOTFS/usr/local/sbin/podroid-"* \
          "$ROOTFS/usr/local/bin/podroid-login" \
          "$ROOTFS/usr/local/bin/podroid-ai" \
-         "$ROOTFS/usr/local/bin/podroid-install-ai"
+         "$ROOTFS/usr/local/bin/podroid-install-ai" \
+         "$ROOTFS/usr/local/bin/podroid-agent"
 
 # --- systemd units ----------------------------------------------------------
 cat > "$ROOTFS/etc/systemd/system/podroid-bootstrap.service" <<'EOF'
