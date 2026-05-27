@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-podroid-agent — Crush-style local-LLM agent for Podroid.
+podroid-agent — Claude-Code-style local-LLM agent for Podroid.
 
-Designed for small phone-CPU models: ~500-token system prompt, simple
-inline tool syntax that 3 B–7 B Q4 weights actually follow reliably,
-and a Claude-Code-shaped TUI that surfaces what the model is doing:
-streaming markdown response, live token counters, context-window
-usage bar, time-to-first-token, tokens/sec, per-turn and cumulative
-stats. Tool calls render as panels with the exact command + its
-captured output.
+Designed for small phone-CPU models (Qwen2.5-Coder-3B/7B Q4) running
+inside the Podroid AI engine. Inline tool syntax (no JSON schema, no
+MCP) keeps small models honest. UI mimics Claude Code: header with
+model + cwd + context bar, live-streaming markdown panel, per-turn
+token / tok-s / TTFB footer, tool-call & result panels, full-width
+auto-redraw on terminal resize.
 
-Tools (inline, one per line, anywhere in the assistant reply):
-  !bash: <command>          — execute one shell command
-  !ls: <path>               — list directory
-  !read: <path>             — cat a file (64 KiB cap)
-  !write: <path>            — write next ```fenced``` block to <path>
+Tools (write each on its own line, anywhere in the assistant reply):
+  !bash: <command>      run any shell command in cwd, pipes/redirects OK
+  !ls: <path>           list a directory (raw path, no shell syntax)
+  !read: <path>         cat a file (64 KiB cap)
+  !write: <path>        write next ```fenced``` block to <path>
+  !edit: <path>         search/replace inside a file (two ```fenced``` blocks: from, to)
 
-No JSON schema, no MCP, no sub-agents — the simpler the protocol, the
-more reliably a small model produces it.
+No permission prompts. Tools execute immediately — the model controls
+the agent loop. An 8-call-per-turn cap defuses runaway loops.
 """
 from __future__ import annotations
 
@@ -25,10 +25,12 @@ import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import requests
 from prompt_toolkit import PromptSession
@@ -38,6 +40,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -45,73 +48,31 @@ from rich.text import Text
 ENDPOINT_BASE = os.environ.get("PODROID_AI_HOST", "http://10.0.2.2:8089").rstrip("/")
 CHAT_URL  = ENDPOINT_BASE + "/v1/chat/completions"
 PROPS_URL = ENDPOINT_BASE + "/props"
+HEALTH_URL = ENDPOINT_BASE + "/health"
 MODEL = os.environ.get("OPENAI_MODEL_NAME", "podroid")
 HISTDIR = pathlib.Path.home() / ".podroid-agent"
 HISTDIR.mkdir(exist_ok=True)
 MAX_TURNS = 24
 
-SYSTEM = """You are podroid-agent, a shell assistant in a Kali NetHunter VM.
-You can execute commands and read/write files via inline tools.
-
-To call a tool, write a line beginning with !tool: at the start of a line.
-The text after the colon is a raw argument, NEVER a shell pipeline — pipes,
-redirects, &&, and globs go through !bash: only.
-
-Available tools (one per line; never embed in markdown fences):
-
-  !bash: <single shell command line>
-      Run any shell command — pipes/grep/find/redirects all work here.
-      Use this for everything that needs shell features.
-      Example: !bash: ls / | grep -i test
-      Example: !bash: find /etc -name '*.conf' -mtime -7
-      Note: each !bash call is a fresh subprocess, so `cd` doesn't persist.
-      Use absolute paths.
-
-  !ls: <directory path>
-      List a single directory. Argument MUST be a plain path with no
-      shell syntax. For filtering, use !bash: ls ... | grep ...
-      Example: !ls: /etc
-      Wrong:   !ls: / | grep test       (use !bash: ls / | grep test)
-
-  !read: <file path>
-      Cat a single file. Plain path only, no shell syntax.
-      Example: !read: /etc/hostname
-
-  !write: <file path>
-  ```
-  <file content here, may be multi-line until the next ``` fence>
-  ```
-
-After every tool call you'll see its output as a user-role message
-prefixed with "tool result:". Continue — call another tool or give a
-plain text answer. When something fails, read the error and adapt
-(if the error mentions "No such file" you used a bad path; switch
-to !bash: with the right shell syntax).
-
-VM environment (constant facts — never guess):
-- Hostname: podroid
-- Primary iface: enp0s3 / 10.0.2.15/24 / gateway 10.0.2.2 (the Android host)
-- Subnet: 10.0.2.0/24. NEVER use 192.168.x.x — wrong network.
-- USB-passthrough Wi-Fi shows up as wlan0/wlan1 when plugged in.
-- Kali rolling, full apt access. nmap, aircrack-ng, wireshark already there.
-- /mnt/android is a 9p share to the phone's /storage/emulated/0/Download dir.
-
-Be concise. Prefer one tool call at a time so you can react to its output.
-"""
-
 console = Console()
 session: PromptSession = PromptSession(history=FileHistory(str(HISTDIR / "history")))
+
+# cwd is tracked here, NOT in environment, because !bash: starts a new
+# subprocess each call. !bash: cd … doesn't persist; the model is told
+# to send !cd: instead (or use absolute paths). os.chdir() is called
+# explicitly from the !cd: handler so !bash / !ls / !read also see it.
+def cwd() -> str:
+    return os.getcwd()
 
 # ── Session statistics ──────────────────────────────────────────────────────
 @dataclass
 class Stats:
-    """Per-session running totals + per-turn snapshot."""
     session_in: int = 0
     session_out: int = 0
     turn_in: int = 0
     turn_out: int = 0
-    turn_ttfb: float = 0.0     # time to first token, seconds
-    turn_gen_time: float = 0.0  # total generation time, seconds
+    turn_ttfb: float = 0.0
+    turn_gen_time: float = 0.0
     ctx_used: int = 0
     ctx_max: int = 16384
 
@@ -121,16 +82,77 @@ class Stats:
 
 stats = Stats()
 
+# ── System prompt ───────────────────────────────────────────────────────────
+def system_prompt() -> str:
+    return f"""You are podroid-agent, a shell + file assistant in a Kali NetHunter VM.
+You can execute commands and read/write files via inline tools.
+
+Current working directory: {cwd()}
+Relative paths in all tools resolve against this cwd.
+
+To call a tool, write a line beginning with ! at the start of a line.
+Pipes/redirects/globs work ONLY inside !bash:. Other tools take a raw path.
+
+Available tools (one per line; never embed in markdown fences):
+
+  !bash: <command>
+      Run a shell command in cwd. Pipes, redirects, &&, globs OK.
+      Each call is a fresh /bin/bash subprocess so `cd` doesn't persist.
+      Use !cd: <dir> to change cwd, or pass absolute paths.
+      Examples:
+        !bash: ls -la | grep -i test
+        !bash: find /etc -name '*.conf' -mtime -7
+        !bash: nmap -sV -p 1-1000 10.0.2.0/24
+
+  !cd: <dir>
+      Change the persistent cwd. All later tools see it.
+      Example: !cd: /root/projects
+
+  !ls: <path>
+      List a directory. Raw path only (no |, no globs).
+      Example: !ls: /etc
+
+  !read: <path>
+      Cat a file. Capped at 64 KiB.
+      Example: !read: /etc/hostname
+
+  !write: <path>
+  ```
+  <full file content; may be multi-line until the closing fence>
+  ```
+      Overwrite the file with the fenced block. Creates parent dirs.
+
+  !edit: <path>
+  ```
+  <exact text to find — must be unique in the file>
+  ```
+  ```
+  <replacement text>
+  ```
+      In-place search/replace. Preferred over !write for small changes.
+
+After every tool call you'll see its output as a user-role message
+prefixed with "tool result:". Continue — call another tool or give a
+plain text answer. When something fails, read the error and adapt.
+
+VM environment (constant — never guess):
+- Hostname: podroid · iface enp0s3 / 10.0.2.15/24 / gateway 10.0.2.2
+- Subnet: 10.0.2.0/24. NEVER 192.168.x.x.
+- USB-passthrough Wi-Fi: wlan0 / wlan1 when plugged in.
+- Kali rolling, full apt access. nmap, aircrack-ng, wireshark already there.
+- /mnt/android is a 9p share to phone's /storage/emulated/0/Download.
+
+Be concise. One tool call per reply when feasible so you can react to its
+output. Plain-text replies end the turn.
+"""
+
 # ── llama-server introspection ─────────────────────────────────────────────
 def probe_context_window() -> int:
-    """Ask the running llama-server what its actual -c value is."""
     try:
         r = requests.get(PROPS_URL, timeout=2)
         if r.status_code != 200:
             return 16384
         data = r.json()
-        # llama-server returns the live setting under one of these keys
-        # depending on version:
         for path in (
             ("default_generation_settings", "n_ctx"),
             ("n_ctx",),
@@ -146,14 +168,21 @@ def probe_context_window() -> int:
                 return cur
     except Exception:
         pass
-    return 16384  # fallback
+    return 16384
 
 # ── Tool implementations ────────────────────────────────────────────────────
+def resolve(p: str) -> str:
+    """Resolve a path against the agent's cwd (so the model's relative
+    paths Just Work even though each bash subprocess starts fresh)."""
+    p = p.strip()
+    return p if os.path.isabs(p) else os.path.join(cwd(), p)
+
 def run_bash(cmd: str) -> str:
     try:
         proc = subprocess.run(
             cmd, shell=True, executable="/bin/bash",
             capture_output=True, text=True, timeout=120,
+            cwd=cwd(),
         )
     except subprocess.TimeoutExpired:
         return "[timeout after 120s]"
@@ -162,77 +191,140 @@ def run_bash(cmd: str) -> str:
         out += ("\n" if out else "") + proc.stderr
     return f"[exit={proc.returncode}]\n{out}".rstrip()
 
-def run_ls(path: str) -> str:
-    path = path.strip() or "."
+def run_cd(dest: str) -> str:
+    p = resolve(dest or ".")
     try:
-        items = sorted(os.listdir(path))
+        os.chdir(p)
+        return f"[cwd → {cwd()}]"
+    except OSError as e:
+        return f"[error: {e}]"
+
+def run_ls(path: str) -> str:
+    p = resolve(path or ".")
+    try:
+        items = sorted(os.listdir(p))
     except OSError as e:
         return f"[error: {e}]"
     return "\n".join(items) if items else "[empty]"
 
 def run_read(path: str) -> str:
     try:
-        with open(path.strip(), "r", encoding="utf-8", errors="replace") as f:
+        with open(resolve(path), "r", encoding="utf-8", errors="replace") as f:
             return f.read(64 * 1024)
     except OSError as e:
         return f"[error: {e}]"
 
 def run_write(path: str, content: str) -> str:
     try:
-        p = pathlib.Path(path.strip())
+        p = pathlib.Path(resolve(path))
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
-        return f"[wrote {len(content)} bytes to {path}]"
+        return f"[wrote {len(content)} bytes to {p}]"
     except OSError as e:
         return f"[error: {e}]"
 
-# ── Tool-call parser ────────────────────────────────────────────────────────
-TOOL_RE = re.compile(r"^!(bash|ls|read|write):\s*(.*)$", re.MULTILINE)
+def run_edit(path: str, find_text: str, replace_text: str) -> str:
+    try:
+        p = pathlib.Path(resolve(path))
+        original = p.read_text()
+    except OSError as e:
+        return f"[error reading: {e}]"
+    if find_text not in original:
+        return "[error: 'find' text not present in file]"
+    if original.count(find_text) > 1:
+        return f"[error: 'find' text appears {original.count(find_text)} times; must be unique]"
+    new = original.replace(find_text, replace_text, 1)
+    try:
+        p.write_text(new)
+    except OSError as e:
+        return f"[error writing: {e}]"
+    return f"[edited {p} — {len(find_text)} → {len(replace_text)} bytes]"
 
-def parse_first_tool(text: str) -> tuple[str, str, str] | None:
+# ── Tool-call parser ────────────────────────────────────────────────────────
+TOOL_RE = re.compile(r"^!(bash|cd|ls|read|write|edit):\s*(.*)$", re.MULTILINE)
+FENCE_RE = re.compile(r"```\n?(.*?)\n?```", re.DOTALL)
+
+def parse_first_tool(text: str) -> tuple[str, str, list[str]] | None:
+    """Return (tool, args, fenced_blocks) for the first tool call in
+    text, or None. fenced_blocks is a list of fenced-code-block contents
+    that follow the tool call line (write→1 block, edit→2 blocks)."""
     m = TOOL_RE.search(text)
     if not m:
         return None
     tool, args = m.group(1), m.group(2).strip()
-    if tool == "write":
-        after = text[m.end():]
-        fence = re.search(r"```\n?(.*?)\n?```", after, re.DOTALL)
-        if fence:
-            return tool, args, fence.group(1)
-        return tool, args, ""
-    return tool, args, ""
+    after = text[m.end():]
+    if tool in ("write", "edit"):
+        blocks = []
+        for fence in FENCE_RE.finditer(after):
+            blocks.append(fence.group(1))
+            if (tool == "write" and len(blocks) == 1) or \
+               (tool == "edit" and len(blocks) == 2):
+                break
+        return tool, args, blocks
+    return tool, args, []
 
-def execute_tool(tool: str, args: str, body: str) -> str:
+def execute_tool(tool: str, args: str, blocks: list[str]) -> str:
     if tool == "bash":  return run_bash(args)
+    if tool == "cd":    return run_cd(args)
     if tool == "ls":    return run_ls(args)
     if tool == "read":  return run_read(args)
-    if tool == "write": return run_write(args, body)
+    if tool == "write":
+        if len(blocks) < 1:
+            return "[error: !write needs a ```fenced``` block with the content]"
+        return run_write(args, blocks[0])
+    if tool == "edit":
+        if len(blocks) < 2:
+            return "[error: !edit needs TWO ```fenced``` blocks — first the search, then the replace]"
+        return run_edit(args, blocks[0], blocks[1])
     return f"[unknown tool: {tool}]"
 
 # ── Rich rendering helpers ──────────────────────────────────────────────────
 def status_bar() -> Text:
-    """Top status bar — model name + cumulative session token counts."""
-    bar = Text()
-    bar.append(" podroid-agent ", style="bold reverse cyan")
-    bar.append(f"  model={MODEL}", style="dim")
-    bar.append(f"  ·  session tokens: ", style="dim")
-    bar.append(f"{stats.session_in}↑", style="bold blue")
-    bar.append(" / ", style="dim")
-    bar.append(f"{stats.session_out}↓", style="bold green")
-    return bar
+    """Top status line — keeps cwd + token counts in view at all times."""
+    cw = console.size.width
+    # Compose into two halves; right-align the right half.
+    left = Text()
+    left.append(" podroid-agent ", style="bold reverse cyan")
+    left.append(" ")
+    left.append(MODEL, style="bold")
+    left.append("  cwd=", style="dim")
+    left.append(_short_cwd(), style="white")
+    right = Text()
+    right.append("session ", style="dim")
+    right.append(f"{stats.session_in}↑", style="bold blue")
+    right.append("/", style="dim")
+    right.append(f"{stats.session_out}↓", style="bold green")
+    pad = max(1, cw - left.cell_len - right.cell_len - 2)
+    return Text.assemble(left, Text(" " * pad), right)
+
+def _short_cwd() -> str:
+    """Shorten cwd: replace $HOME with ~, cap at 40 chars from the right."""
+    s = cwd()
+    home = str(pathlib.Path.home())
+    if s == home:
+        return "~"
+    if s.startswith(home + os.sep):
+        s = "~" + s[len(home):]
+    if len(s) > 40:
+        s = "…" + s[-39:]
+    return s
 
 def context_bar() -> Panel:
-    used = stats.ctx_used
-    pct = used / stats.ctx_max if stats.ctx_max else 0.0
-    pb = ProgressBar(total=stats.ctx_max, completed=used, width=40,
-                     complete_style="cyan", finished_style="red")
-    label = Text(f" {used:>5}/{stats.ctx_max} tokens ({pct*100:4.1f}%) ",
-                 style="dim")
-    return Panel(Group(pb, label), title="[dim]context window[/dim]",
-                 border_style="dim", expand=False, padding=(0, 1))
+    used, mx = stats.ctx_used, stats.ctx_max
+    pct = used / mx if mx else 0.0
+    width = max(20, console.size.width - 30)
+    pb = ProgressBar(
+        total=mx, completed=used, width=width,
+        complete_style=("yellow" if pct > 0.7 else "cyan"),
+        finished_style="red",
+    )
+    label = Text(f"  {used:>5}/{mx} tokens · {pct*100:4.1f}%", style="dim")
+    return Panel(
+        Group(pb, label), title="[dim]context window[/dim]",
+        border_style="dim", expand=False, padding=(0, 1),
+    )
 
 def turn_footer() -> Text:
-    """Per-turn footer — exactly the format Claude Code prints."""
     if stats.turn_in == 0 and stats.turn_out == 0:
         return Text("")
     rate = stats.turn_out / stats.turn_gen_time if stats.turn_gen_time > 0 else 0
@@ -248,11 +340,101 @@ def turn_footer() -> Text:
     f.append(f"  ·  total {stats.turn_gen_time:.1f}s", style="dim")
     return f
 
+# ── Initialization warmup ──────────────────────────────────────────────────
+def warmup_engine() -> bool:
+    """Send a tiny ping to /v1/chat/completions so the model is loaded
+    into RAM before the user's first real prompt. Shows a live timer so
+    the user sees something is happening and the first 30-90s of model
+    load doesn't feel like a hang. Blocks all keyboard input until the
+    ping returns. Returns True on success."""
+    result: dict = {"done": False, "ok": False, "err": None,
+                    "tokens_in": 0, "tokens_out": 0}
+
+    def do_ping() -> None:
+        try:
+            r = requests.post(CHAT_URL, json={
+                "model": MODEL,
+                "stream": False,
+                "messages": [{"role": "user", "content": "."}],
+                "max_tokens": 1,
+                "temperature": 0,
+            }, timeout=300)
+            result["ok"] = r.status_code == 200
+            if r.status_code == 200:
+                u = r.json().get("usage") or {}
+                result["tokens_in"] = u.get("prompt_tokens", 0)
+                result["tokens_out"] = u.get("completion_tokens", 0)
+            else:
+                result["err"] = f"HTTP {r.status_code}: {r.text[:200]}"
+        except requests.exceptions.RequestException as e:
+            result["err"] = str(e)
+        finally:
+            result["done"] = True
+
+    t0 = time.monotonic()
+    t = threading.Thread(target=do_ping, daemon=True)
+    t.start()
+
+    def panel(elapsed: float) -> Panel:
+        spin = Spinner("dots", text=Text.assemble(
+            ("Initializing AI engine — loading model into memory", "bold"),
+            ("\n", ""),
+            (f"This is a one-time cost per session. Typical first-load is 30–90s on phone CPU.\n", "dim"),
+            (f"Endpoint: {ENDPOINT_BASE}    Model: {MODEL}\n", "dim"),
+            (f"Elapsed: {elapsed:.1f}s", "yellow bold"),
+        ))
+        return Panel(spin, title="[bold cyan]podroid-agent · warming up[/bold cyan]",
+                     border_style="cyan", padding=(1, 2))
+
+    with Live(panel(0.0), refresh_per_second=4, transient=True) as live:
+        while not result["done"]:
+            live.update(panel(time.monotonic() - t0))
+            time.sleep(0.25)
+        live.update(panel(time.monotonic() - t0))
+
+    if result["ok"]:
+        # Surface what the warmup cost so the user sees that the eventual
+        # "slow" first prompt was actually the very fastest possible.
+        elapsed = time.monotonic() - t0
+        stats.ctx_used = result["tokens_in"] + result["tokens_out"]
+        console.print(Panel.fit(
+            Text.assemble(
+                ("✓ Engine ready — ", "bold green"),
+                (f"loaded in {elapsed:.1f}s. ", "green"),
+                ("Subsequent turns will reuse the warm model.", "dim"),
+            ),
+            border_style="green",
+        ))
+        return True
+    console.print(Panel(
+        Text.assemble(
+            ("✗ Engine warmup failed.\n", "bold red"),
+            (result["err"] or "(unknown)", "red"),
+            ("\n\nOn the phone:  Settings → AI Engine → Enable engine → wait for "
+             "state Running → re-run podroid-agent.\n", "yellow"),
+        ),
+        title="[red]initialization error[/red]", border_style="red",
+    ))
+    return False
+
+# ── SIGWINCH handler ───────────────────────────────────────────────────────
+def install_sigwinch_handler() -> None:
+    """Force Live renders + the next prompt redraw on terminal resize. Rich
+    queries console.size per render so most repaints handle themselves; we
+    only need to nudge prompt_toolkit if it's currently sitting on the
+    prompt waiting for input."""
+    def handler(signum, frame):
+        try:
+            session.app.invalidate()
+        except Exception:
+            pass
+    try:
+        signal.signal(signal.SIGWINCH, handler)
+    except (AttributeError, ValueError):
+        pass  # not on Linux, or already inside an event-loop installer
+
 # ── LLM streaming with live markdown render ────────────────────────────────
 def stream_completion(messages: list[dict]) -> str:
-    """Stream a single completion with a live-updating markdown panel,
-    a spinner before the first token, and per-turn stats. Returns the
-    full assistant message text."""
     body = {
         "model": MODEL,
         "stream": True,
@@ -265,14 +447,14 @@ def stream_completion(messages: list[dict]) -> str:
     t0 = time.monotonic()
     first_token_at: float | None = None
     chunks: list[str] = []
+    stream_error: str | None = None
 
     try:
         r = requests.post(CHAT_URL, json=body, stream=True, timeout=300)
-    except requests.exceptions.ConnectionError as e:
+    except requests.exceptions.RequestException as e:
         console.print(Panel(
             f"[red]Engine unreachable: {e}[/red]\n\n"
-            "On the phone:  Settings → AI Engine → Enable engine  →  "
-            "wait for state Running  →  retry.",
+            "On the phone: Settings → AI Engine → Restart, wait for Running, retry.",
             title="[red]connection error[/red]", border_style="red",
         ))
         return ""
@@ -284,25 +466,23 @@ def stream_completion(messages: list[dict]) -> str:
         return ""
 
     def render() -> Group:
-        body_md = Markdown("".join(chunks)) if chunks else Text(
-            "  thinking… (prompt eval can take 30-90s on phone CPU)",
-            style="dim italic",
-        )
+        if chunks:
+            body_render = Markdown("".join(chunks))
+        else:
+            body_render = Spinner("dots", text=Text(
+                "  thinking…", style="dim italic",
+            ))
         return Group(
             status_bar(),
-            Panel(body_md, title="[bold green]assistant[/bold green]",
-                  border_style="green", padding=(0, 1)),
+            Panel(body_render,
+                  title="[bold green]assistant[/bold green]",
+                  border_style="green", padding=(0, 1), expand=True),
             context_bar(),
         )
 
     usage_payload: dict | None = None
-    stream_error: str | None = None
     with Live(render(), console=console, refresh_per_second=8,
               transient=False, vertical_overflow="visible") as live:
-        # Wrap the stream consumption: llama-server occasionally drops
-        # the connection mid-token (OOM kill, watchdog timeout, user
-        # toggle). Don't crash the whole REPL — keep whatever text we
-        # got, surface the error, let the next prompt try again.
         try:
             for line in r.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data:"):
@@ -314,8 +494,6 @@ def stream_completion(messages: list[dict]) -> str:
                     obj = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                # The final usage chunk in OpenAI-compat streams has empty
-                # choices[] and a populated usage{}.
                 if "usage" in obj and obj["usage"]:
                     usage_payload = obj["usage"]
                 choices = obj.get("choices") or []
@@ -333,7 +511,6 @@ def stream_completion(messages: list[dict]) -> str:
                 requests.exceptions.ReadTimeout) as e:
             stream_error = f"stream interrupted: {e.__class__.__name__}: {e}"
 
-        # Final render + stats commit
         stats.turn_gen_time = time.monotonic() - t0
         if usage_payload:
             stats.turn_in  = int(usage_payload.get("prompt_tokens", 0))
@@ -345,11 +522,9 @@ def stream_completion(messages: list[dict]) -> str:
 
     console.print(turn_footer())
     if stream_error:
-        # Probe /health so the user sees whether the engine is alive
-        # right now (transient hiccup vs full crash). Quick non-blocking.
         engine_state = "unknown"
         try:
-            h = requests.get(ENDPOINT_BASE + "/health", timeout=2)
+            h = requests.get(HEALTH_URL, timeout=2)
             engine_state = ("ok" if h.status_code == 200
                             else f"{h.status_code} {h.text[:80]}")
         except Exception as e:
@@ -357,42 +532,63 @@ def stream_completion(messages: list[dict]) -> str:
         console.print(Panel(
             f"[red]{stream_error}[/red]\n"
             f"engine /health: {engine_state}\n\n"
-            "[yellow]If the engine is unreachable: phone Notification → Restart "
-            "the AI engine, wait for state Running, then retry the same prompt.[/yellow]",
+            "[yellow]Phone → Notification → Restart the AI engine, wait for "
+            "state Running, then retry the same prompt.[/yellow]",
             title="[red]engine error[/red]", border_style="red",
         ))
     return "".join(chunks)
 
-# ── Main REPL ───────────────────────────────────────────────────────────────
-def header() -> None:
-    console.rule(
-        f"[bold cyan]podroid-agent[/]  ·  endpoint={ENDPOINT_BASE}  ·  "
-        f"model={MODEL}  ·  ctx={stats.ctx_max}",
-    )
-    console.print(
-        "[dim]/reset clear history  ·  /save NAME  ·  /load NAME  ·  "
-        "/stats show session counters  ·  /exit  ·  Ctrl+D quit[/dim]"
-    )
+# ── REPL ────────────────────────────────────────────────────────────────────
+def banner() -> None:
+    console.print(Panel.fit(
+        Text.assemble(
+            ("podroid-agent", "bold cyan"),
+            ("\nLocal-LLM agent · Claude-Code-style UX for Podroid\n", "dim"),
+            (f"  Endpoint   ", "dim"), (ENDPOINT_BASE, "white"), ("\n", ""),
+            (f"  Model      ", "dim"), (MODEL, "white"), ("\n", ""),
+            (f"  Context    ", "dim"), (f"{stats.ctx_max} tokens\n", "white"),
+            (f"  Working in ", "dim"), (cwd(), "white"), ("\n\n", ""),
+            ("Commands: ", "bold"),
+            ("/reset  /save NAME  /load NAME  /stats  /cwd  /exit  ·  Ctrl+D quit\n",
+             "dim"),
+            ("Multi-line: ", "bold"),
+            ("Esc+Enter sends.", "dim"),
+        ),
+        border_style="cyan",
+    ))
 
-def show_stats_table() -> None:
+def show_stats() -> None:
     t = Table(title="Session statistics", show_header=False, border_style="dim")
     t.add_row("Endpoint",       ENDPOINT_BASE)
     t.add_row("Model",          MODEL)
+    t.add_row("CWD",            cwd())
     t.add_row("Context window", f"{stats.ctx_max} tokens")
     t.add_row("Context used",   f"{stats.ctx_used} tokens "
                                 f"({100*stats.ctx_used/max(stats.ctx_max,1):.1f}%)")
-    t.add_row("Session in",     f"{stats.session_in} tokens (prompt)")
-    t.add_row("Session out",    f"{stats.session_out} tokens (completion)")
+    t.add_row("Session prompt", f"{stats.session_in} tokens")
+    t.add_row("Session output", f"{stats.session_out} tokens")
     console.print(t)
 
 def main() -> None:
     stats.ctx_max = probe_context_window()
-    header()
-    messages: list[dict] = [{"role": "system", "content": SYSTEM}]
+    install_sigwinch_handler()
+    banner()
+
+    # Block all input until the model is actually loaded into RAM.
+    # First call to /v1/chat/completions triggers the model load
+    # (~30-90s for 7B on phone CPU); we eat that here so the user's
+    # first real prompt feels normal-speed.
+    if not warmup_engine():
+        return
+
+    messages: list[dict] = [{"role": "system", "content": system_prompt()}]
 
     while True:
         try:
-            user = session.prompt("\npodroid-agent ❯ ").strip()
+            user = session.prompt(
+                "\npodroid-agent ❯ ",
+                multiline=True,
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
             return
@@ -402,12 +598,16 @@ def main() -> None:
         if user in ("/exit", "/quit"):
             return
         if user == "/reset":
-            messages = [messages[0]]
+            # Rebuild the system prompt so the latest cwd is baked in.
+            messages = [{"role": "system", "content": system_prompt()}]
             stats.ctx_used = 0
-            console.print("[dim](history cleared)[/dim]")
+            console.print("[dim](history cleared, cwd refreshed)[/dim]")
+            continue
+        if user == "/cwd":
+            console.print(f"[cyan]cwd:[/cyan] {cwd()}")
             continue
         if user == "/stats":
-            show_stats_table()
+            show_stats()
             continue
         if user.startswith("/save "):
             name = user[6:].strip() or "default"
@@ -424,11 +624,11 @@ def main() -> None:
             console.print(f"[dim](loaded {name}, {len(messages)} turns)[/dim]")
             continue
 
+        # Each turn refreshes the system message so the model sees the
+        # current cwd if the user did /cd or the previous turn used !cd:.
+        messages[0] = {"role": "system", "content": system_prompt()}
         messages.append({"role": "user", "content": user})
 
-        # Tool-call loop — keep generating + executing until the model
-        # produces a plain reply with no tool calls. Hard-capped at 8
-        # iterations per turn to defuse runaway loops.
         for _ in range(8):
             reply = stream_completion(messages)
             if not reply:
@@ -438,14 +638,20 @@ def main() -> None:
             parsed = parse_first_tool(reply)
             if not parsed:
                 break
-            tool, args, body = parsed
+            tool, args, blocks = parsed
+            preview = f"!{tool}: {args}"
+            if blocks:
+                first = blocks[0][:200] + ("…" if len(blocks[0]) > 200 else "")
+                preview += f"\n```\n{first}\n```"
+                if len(blocks) > 1:
+                    second = blocks[1][:200] + ("…" if len(blocks[1]) > 200 else "")
+                    preview += f"\n```\n{second}\n```"
             console.print(Panel(
-                f"!{tool}: {args}" + (f"\n```\n{body[:200]}{'…' if len(body)>200 else ''}\n```" if body else ""),
-                title="[cyan]▶ tool call[/cyan]",
+                preview, title="[cyan]▶ tool call[/cyan]",
                 border_style="cyan", expand=False,
             ))
             t_tool = time.monotonic()
-            result = execute_tool(tool, args, body)
+            result = execute_tool(tool, args, blocks)
             tool_dt = time.monotonic() - t_tool
             display = result[:4000] + ("\n…[truncated]" if len(result) > 4000 else "")
             console.print(Panel(
@@ -453,9 +659,9 @@ def main() -> None:
                 title=f"[green]◀ tool result · {tool_dt:.2f}s[/green]",
                 border_style="green", expand=False,
             ))
-            messages.append({"role": "user", "content": f"tool result:\n{result}"})
+            messages.append({"role": "user",
+                             "content": f"tool result:\n{result}"})
 
-        # Trim history but always keep the system message.
         if len(messages) > 2 * MAX_TURNS + 1:
             messages = [messages[0]] + messages[-2 * MAX_TURNS:]
 
