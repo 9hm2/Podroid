@@ -109,7 +109,10 @@ SYSTEM = f"""You are podroid-agent, a shell + file assistant in a Kali NetHunter
 
 OUTPUT FORMAT — read this carefully:
 - To execute something, write a tool call on its own line starting with !
-- To answer in plain text, just write the text — no !prefix
+  THEN STOP. End your message right there. Do NOT write anything after the
+  tool call — no preview of the output, no commentary. The system will run
+  the tool and send you the real output in the next message.
+- To answer in plain text, just write the text — no !prefix.
 - NEVER output "tool result:" or "[OUTPUT]" — those are messages YOU receive,
   not messages you produce. You produce tool calls or plain text only.
 
@@ -285,6 +288,28 @@ def run_edit(path: str, find_text: str, replace_text: str) -> str:
 # ── Tool-call parser ────────────────────────────────────────────────────────
 TOOL_RE = re.compile(r"^!(bash|cd|ls|read|write|edit):\s*(.*)$", re.MULTILINE)
 FENCE_RE = re.compile(r"```\n?(.*?)\n?```", re.DOTALL)
+
+def is_complete_tool_call(text: str) -> bool:
+    """True iff `text` already contains a syntactically-complete tool
+    call — used to abort the stream early, before the model can
+    fabricate its own pseudo [OUTPUT] block underneath.
+
+    Single-line tools (bash / cd / ls / read) are complete once the
+    args line ends in a newline. Block tools (write / edit) need 1 or
+    2 fenced blocks respectively to close out.
+    """
+    m = TOOL_RE.search(text)
+    if not m:
+        return False
+    tool = m.group(1)
+    after = text[m.end():]
+    if tool in ("bash", "cd", "ls", "read"):
+        return "\n" in after
+    if tool == "write":
+        return after.count("```") >= 2
+    if tool == "edit":
+        return after.count("```") >= 4
+    return False
 
 def parse_first_tool(text: str) -> tuple[str, str, list[str]] | None:
     """Return (tool, args, fenced_blocks) for the first tool call in
@@ -495,6 +520,11 @@ def stream_completion(messages: list[dict]) -> str:
         # system-prompt + warmup pre-eval, the first user turn skips
         # the system-prompt eval (~600 tokens) entirely.
         "cache_prompt": True,
+        # Hard stops — keep the model from generating the words we use
+        # to label tool results (it loves to mimic them and fabricate
+        # output). Server cuts generation the moment it would emit
+        # these substrings.
+        "stop": ["[OUTPUT]", "\ntool result:", "\n\ntool result:"],
     }
     stats.reset_turn()
     t0 = time.monotonic()
@@ -559,6 +589,19 @@ def stream_completion(messages: list[dict]) -> str:
                         stats.turn_ttfb = first_token_at - t0
                     chunks.append(delta)
                     live.update(render())
+                    # Early-stop: as soon as the model has emitted a
+                    # syntactically-complete tool call, cancel the
+                    # stream — anything it writes after is fabrication
+                    # ("preview of the output") which wastes tokens and
+                    # confuses the next turn. Server-side generation
+                    # continues briefly, but our parser sees only the
+                    # tool call.
+                    if is_complete_tool_call("".join(chunks)):
+                        try:
+                            r.close()
+                        except Exception:
+                            pass
+                        break
         except (requests.exceptions.ChunkedEncodingError,
                 requests.exceptions.ConnectionError,
                 requests.exceptions.ReadTimeout) as e:
