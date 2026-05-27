@@ -374,7 +374,11 @@ install_crush() {
     }
   },
   "options": {
-    "disabled_tools": ["sourcegraph", "fetch", "agent", "diagnostics"]
+    "disabled_tools": [
+      "sourcegraph", "fetch", "webfetch", "web_search",
+      "agent", "diagnostics", "notebook", "thinking",
+      "todo", "multiedit", "glob", "mcp"
+    ]
   }
 }
 EOF
