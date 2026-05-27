@@ -329,23 +329,26 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────────
 install_crush() {
     if command -v crush >/dev/null 2>&1; then
-        ok "crush already installed: $(crush --version 2>/dev/null | head -1)"
-        return
+        ok "crush binary already installed: $(crush --version 2>/dev/null | head -1)"
+    else
+        log "Fetching Crush latest release for linux-arm64"
+        # Resolve the latest tag and arm64 tarball URL from GitHub's releases
+        # API. Tarball naming is `crush_<ver>_Linux_arm64.tar.gz`.
+        local url
+        url=$(curl -fsSL https://api.github.com/repos/charmbracelet/crush/releases/latest \
+                | grep -oE '"browser_download_url": "[^"]*[Ll]inux_arm64\.tar\.gz"' \
+                | head -1 | cut -d'"' -f4)
+        test -n "$url" || { fail "couldn't resolve Crush arm64 release URL"; return 1; }
+        curl -fsSL -o /tmp/crush.tar.gz "$url"
+        tar xzf /tmp/crush.tar.gz -C /tmp
+        install -m 755 /tmp/crush*/crush /usr/local/bin/crush
+        rm -rf /tmp/crush*
     fi
-    log "Fetching Crush latest release for linux-arm64"
-    # Resolve the latest tag and arm64 tarball URL from GitHub's releases
-    # API. Tarball naming is `crush_<ver>_Linux_arm64.tar.gz`.
-    local url
-    url=$(curl -fsSL https://api.github.com/repos/charmbracelet/crush/releases/latest \
-            | grep -oE '"browser_download_url": "[^"]*[Ll]inux_arm64\.tar\.gz"' \
-            | head -1 | cut -d'"' -f4)
-    test -n "$url" || { fail "couldn't resolve Crush arm64 release URL"; return 1; }
-    curl -fsSL -o /tmp/crush.tar.gz "$url"
-    tar xzf /tmp/crush.tar.gz -C /tmp
-    install -m 755 /tmp/crush*/crush /usr/local/bin/crush
-    rm -rf /tmp/crush*
 
-    # Pre-seed config — Crush reads $HOME/.config/crush/crush.json (note:
+    # ALWAYS rewrite the config — re-running the installer should
+    # repair a broken / outdated JSON, not silently skip it because
+    # `crush` happens to be present in $PATH. Earlier versions of this
+    # script returned early here and left stale 8K configs in place.
     # filename is crush.json, NOT config.json). Schema docs at
     # https://charm.land/crush.json. Drop the same content into every
     # home dir so all users start pre-routed at the local server.
