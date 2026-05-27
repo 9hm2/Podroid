@@ -345,33 +345,34 @@ install_crush() {
     install -m 755 /tmp/crush*/crush /usr/local/bin/crush
     rm -rf /tmp/crush*
 
-    # Pre-seed config — Crush reads $XDG_CONFIG_HOME/crush/config.json or
-    # ~/.config/crush/config.json. Drop the same content into every home
-    # dir so all users start pre-routed at the local server.
+    # Pre-seed config — Crush reads $HOME/.config/crush/crush.json (note:
+    # filename is crush.json, NOT config.json). Schema docs at
+    # https://charm.land/crush.json. Drop the same content into every
+    # home dir so all users start pre-routed at the local server.
     for h in /etc/skel /root /home/*; do
         [ -d "$h" ] || continue
         local cfgdir="$h/.config/crush"
         local owner=root:root
         [ "$h" != /etc/skel ] && owner=$(stat -c '%U:%G' "$h" 2>/dev/null) || true
         install -d -o "${owner%:*}" -g "${owner#*:}" "$cfgdir"
-        cat > "$cfgdir/config.json" <<EOF
+        cat > "$cfgdir/crush.json" <<EOF
 {
+  "\$schema": "https://charm.land/crush.json",
   "providers": {
     "podroid": {
-      "name": "Podroid Local LLM",
-      "api_base": "$LLAMA_HOST/v1",
+      "type": "openai-compat",
+      "base_url": "$LLAMA_HOST/v1",
       "api_key": "sk-podroid-local",
-      "type": "openai"
+      "models": [
+        {
+          "id": "podroid",
+          "name": "Podroid Local LLM",
+          "context_window": 8192,
+          "default_max_tokens": 2048
+        }
+      ]
     }
-  },
-  "models": {
-    "default": {
-      "provider": "podroid",
-      "model": "podroid",
-      "max_tokens": 4096
-    }
-  },
-  "context_paths": [".", "CLAUDE.md", "README.md"]
+  }
 }
 EOF
         chown -R "$owner" "$cfgdir" 2>/dev/null || true
