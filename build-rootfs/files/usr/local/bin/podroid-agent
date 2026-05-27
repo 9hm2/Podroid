@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-podroid-agent — minimal Crush-style agent for local LLMs on Podroid.
+podroid-agent — Crush-style local-LLM agent for Podroid.
 
-Conversational REPL with bash / read / write / ls tools, plus rich
-markdown rendering. The whole system prompt is ~500 tokens (vs
-Crush's ~9k) so it fits inside any reasonable context window on a
-phone-class CPU model.
+Designed for small phone-CPU models: ~500-token system prompt, simple
+inline tool syntax that 3 B–7 B Q4 weights actually follow reliably,
+and a Claude-Code-shaped TUI that surfaces what the model is doing:
+streaming markdown response, live token counters, context-window
+usage bar, time-to-first-token, tokens/sec, per-turn and cumulative
+stats. Tool calls render as panels with the exact command + its
+captured output.
 
-Tool calls are inline lines starting with `!tool:` — the model writes
-them as part of its reply, we parse + execute + feed results back.
-No JSON-schema tool API gymnastics, no MCP, no sub-agents. Reliable
-on 3 B / 7 B Q4 models that struggle with structured function-calling.
+Tools (inline, one per line, anywhere in the assistant reply):
+  !bash: <command>          — execute one shell command
+  !ls: <path>               — list directory
+  !read: <path>             — cat a file (64 KiB cap)
+  !write: <path>            — write next ```fenced``` block to <path>
+
+No JSON schema, no MCP, no sub-agents — the simpler the protocol, the
+more reliably a small model produces it.
 """
 from __future__ import annotations
 
@@ -18,27 +25,30 @@ import json
 import os
 import pathlib
 import re
-import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 
 import requests
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
+from rich.progress_bar import ProgressBar
+from rich.table import Table
+from rich.text import Text
 
 # ── Config ──────────────────────────────────────────────────────────────────
-ENDPOINT = os.environ.get(
-    "PODROID_AI_HOST", "http://10.0.2.2:8089"
-).rstrip("/") + "/v1/chat/completions"
+ENDPOINT_BASE = os.environ.get("PODROID_AI_HOST", "http://10.0.2.2:8089").rstrip("/")
+CHAT_URL  = ENDPOINT_BASE + "/v1/chat/completions"
+PROPS_URL = ENDPOINT_BASE + "/props"
 MODEL = os.environ.get("OPENAI_MODEL_NAME", "podroid")
 HISTDIR = pathlib.Path.home() / ".podroid-agent"
 HISTDIR.mkdir(exist_ok=True)
-MAX_TURNS = 24  # trim context after this many turns
+MAX_TURNS = 24
 
 SYSTEM = """You are podroid-agent, a shell assistant in a Kali NetHunter VM.
 You can execute commands and read/write files via inline tools.
@@ -50,7 +60,7 @@ Available tools (one per line; never embed in markdown fences):
       Execute one shell command. You receive stdout+stderr+exit code.
 
   !ls: <path>
-      List directory contents. Use this before bash for navigation.
+      List directory contents.
 
   !read: <path>
       Cat a file. Returns its contents.
@@ -61,12 +71,12 @@ Available tools (one per line; never embed in markdown fences):
   ```
 
 After every tool call you'll see its output as a user-role message
-prefixed with "tool result:". Continue the conversation — call another
-tool or give a plain text answer.
+prefixed with "tool result:". Continue — call another tool or give a
+plain text answer.
 
 VM environment (constant facts — never guess):
 - Hostname: podroid
-- Primary iface: enp0s3 / 10.0.2.15/24 / gateway 10.0.2.2 (= the Android host)
+- Primary iface: enp0s3 / 10.0.2.15/24 / gateway 10.0.2.2 (the Android host)
 - Subnet: 10.0.2.0/24. NEVER use 192.168.x.x — wrong network.
 - USB-passthrough Wi-Fi shows up as wlan0/wlan1 when plugged in.
 - Kali rolling, full apt access. nmap, aircrack-ng, wireshark already there.
@@ -77,6 +87,52 @@ Be concise. Prefer one tool call at a time so you can react to its output.
 
 console = Console()
 session: PromptSession = PromptSession(history=FileHistory(str(HISTDIR / "history")))
+
+# ── Session statistics ──────────────────────────────────────────────────────
+@dataclass
+class Stats:
+    """Per-session running totals + per-turn snapshot."""
+    session_in: int = 0
+    session_out: int = 0
+    turn_in: int = 0
+    turn_out: int = 0
+    turn_ttfb: float = 0.0     # time to first token, seconds
+    turn_gen_time: float = 0.0  # total generation time, seconds
+    ctx_used: int = 0
+    ctx_max: int = 16384
+
+    def reset_turn(self) -> None:
+        self.turn_in = self.turn_out = 0
+        self.turn_ttfb = self.turn_gen_time = 0.0
+
+stats = Stats()
+
+# ── llama-server introspection ─────────────────────────────────────────────
+def probe_context_window() -> int:
+    """Ask the running llama-server what its actual -c value is."""
+    try:
+        r = requests.get(PROPS_URL, timeout=2)
+        if r.status_code != 200:
+            return 16384
+        data = r.json()
+        # llama-server returns the live setting under one of these keys
+        # depending on version:
+        for path in (
+            ("default_generation_settings", "n_ctx"),
+            ("n_ctx",),
+            ("default_generation_settings", "params", "n_ctx"),
+        ):
+            cur: object = data
+            for key in path:
+                if not isinstance(cur, dict) or key not in cur:
+                    cur = None
+                    break
+                cur = cur[key]
+            if isinstance(cur, int) and cur > 0:
+                return cur
+    except Exception:
+        pass
+    return 16384  # fallback
 
 # ── Tool implementations ────────────────────────────────────────────────────
 def run_bash(cmd: str) -> str:
@@ -103,41 +159,33 @@ def run_ls(path: str) -> str:
 def run_read(path: str) -> str:
     try:
         with open(path.strip(), "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(64 * 1024)  # cap at 64 KiB to keep context sane
-        return content
+            return f.read(64 * 1024)
     except OSError as e:
         return f"[error: {e}]"
 
 def run_write(path: str, content: str) -> str:
     try:
-        path_obj = pathlib.Path(path.strip())
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        path_obj.write_text(content)
+        p = pathlib.Path(path.strip())
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
         return f"[wrote {len(content)} bytes to {path}]"
     except OSError as e:
         return f"[error: {e}]"
 
 # ── Tool-call parser ────────────────────────────────────────────────────────
-# Each match yields a (tool_name, args) tuple. Multi-line !write: blocks are
-# captured by the trailing ```fence so the model can include line breaks.
-TOOL_RE = re.compile(
-    r"^!(bash|ls|read|write):\s*(.*)$",
-    re.MULTILINE,
-)
+TOOL_RE = re.compile(r"^!(bash|ls|read|write):\s*(.*)$", re.MULTILINE)
 
 def parse_first_tool(text: str) -> tuple[str, str, str] | None:
-    """Return (tool, args, remainder_after_block) for the FIRST tool call
-    in text, or None if none. For !write: also strips the ```…``` fence."""
     m = TOOL_RE.search(text)
     if not m:
         return None
     tool, args = m.group(1), m.group(2).strip()
     if tool == "write":
-        # Look for a fenced block right after the !write: line.
         after = text[m.end():]
-        fence = re.search(r"```\n(.*?)\n```", after, re.DOTALL)
+        fence = re.search(r"```\n?(.*?)\n?```", after, re.DOTALL)
         if fence:
             return tool, args, fence.group(1)
+        return tool, args, ""
     return tool, args, ""
 
 def execute_tool(tool: str, args: str, body: str) -> str:
@@ -147,57 +195,158 @@ def execute_tool(tool: str, args: str, body: str) -> str:
     if tool == "write": return run_write(args, body)
     return f"[unknown tool: {tool}]"
 
-# ── LLM streaming ───────────────────────────────────────────────────────────
+# ── Rich rendering helpers ──────────────────────────────────────────────────
+def status_bar() -> Text:
+    """Top status bar — model name + cumulative session token counts."""
+    bar = Text()
+    bar.append(" podroid-agent ", style="bold reverse cyan")
+    bar.append(f"  model={MODEL}", style="dim")
+    bar.append(f"  ·  session tokens: ", style="dim")
+    bar.append(f"{stats.session_in}↑", style="bold blue")
+    bar.append(" / ", style="dim")
+    bar.append(f"{stats.session_out}↓", style="bold green")
+    return bar
+
+def context_bar() -> Panel:
+    used = stats.ctx_used
+    pct = used / stats.ctx_max if stats.ctx_max else 0.0
+    pb = ProgressBar(total=stats.ctx_max, completed=used, width=40,
+                     complete_style="cyan", finished_style="red")
+    label = Text(f" {used:>5}/{stats.ctx_max} tokens ({pct*100:4.1f}%) ",
+                 style="dim")
+    return Panel(Group(pb, label), title="[dim]context window[/dim]",
+                 border_style="dim", expand=False, padding=(0, 1))
+
+def turn_footer() -> Text:
+    """Per-turn footer — exactly the format Claude Code prints."""
+    if stats.turn_in == 0 and stats.turn_out == 0:
+        return Text("")
+    rate = stats.turn_out / stats.turn_gen_time if stats.turn_gen_time > 0 else 0
+    f = Text()
+    f.append("  Tokens: ", style="dim")
+    f.append(f"{stats.turn_in} sent", style="blue")
+    f.append(", ", style="dim")
+    f.append(f"{stats.turn_out} received", style="green")
+    f.append("  ·  ", style="dim")
+    f.append(f"ttfb {stats.turn_ttfb:.1f}s", style="yellow")
+    f.append("  ·  ", style="dim")
+    f.append(f"{rate:.1f} tok/s", style="magenta")
+    f.append(f"  ·  total {stats.turn_gen_time:.1f}s", style="dim")
+    return f
+
+# ── LLM streaming with live markdown render ────────────────────────────────
 def stream_completion(messages: list[dict]) -> str:
-    """Stream a single completion, printing tokens as they arrive. Returns
-    the full assistant message."""
+    """Stream a single completion with a live-updating markdown panel,
+    a spinner before the first token, and per-turn stats. Returns the
+    full assistant message text."""
     body = {
         "model": MODEL,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "messages": messages,
         "temperature": 0.3,
         "max_tokens": 2048,
     }
+    stats.reset_turn()
+    t0 = time.monotonic()
+    first_token_at: float | None = None
+    chunks: list[str] = []
+
     try:
-        r = requests.post(ENDPOINT, json=body, stream=True, timeout=300)
+        r = requests.post(CHAT_URL, json=body, stream=True, timeout=300)
     except requests.exceptions.ConnectionError as e:
-        console.print(f"[red]✗ Engine unreachable: {e}[/red]")
-        console.print(
-            "[yellow]On the phone: Settings → AI Engine → Enable engine, "
-            "wait for state Running, then retry.[/yellow]"
-        )
+        console.print(Panel(
+            f"[red]Engine unreachable: {e}[/red]\n\n"
+            "On the phone:  Settings → AI Engine → Enable engine  →  "
+            "wait for state Running  →  retry.",
+            title="[red]connection error[/red]", border_style="red",
+        ))
         return ""
     if r.status_code != 200:
-        console.print(f"[red]✗ HTTP {r.status_code}: {r.text[:200]}[/red]")
+        console.print(Panel(
+            f"HTTP {r.status_code}\n{r.text[:400]}",
+            title="[red]server error[/red]", border_style="red",
+        ))
         return ""
 
-    chunks: list[str] = []
-    for line in r.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            delta = json.loads(data)["choices"][0]["delta"].get("content", "")
-        except (KeyError, IndexError, json.JSONDecodeError):
-            continue
-        if delta:
-            chunks.append(delta)
-            sys.stdout.write(delta)
-            sys.stdout.flush()
-    print()
+    def render() -> Group:
+        body_md = Markdown("".join(chunks)) if chunks else Text(
+            "  thinking… (prompt eval can take 30-90s on phone CPU)",
+            style="dim italic",
+        )
+        return Group(
+            status_bar(),
+            Panel(body_md, title="[bold green]assistant[/bold green]",
+                  border_style="green", padding=(0, 1)),
+            context_bar(),
+        )
+
+    usage_payload: dict | None = None
+    with Live(render(), console=console, refresh_per_second=8,
+              transient=False, vertical_overflow="visible") as live:
+        for line in r.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            # The final usage chunk in OpenAI-compat streams has empty
+            # choices[] and a populated usage{}.
+            if "usage" in obj and obj["usage"]:
+                usage_payload = obj["usage"]
+            choices = obj.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {}).get("content", "")
+            if delta:
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                    stats.turn_ttfb = first_token_at - t0
+                chunks.append(delta)
+                live.update(render())
+
+        # Final render + stats commit
+        stats.turn_gen_time = time.monotonic() - t0
+        if usage_payload:
+            stats.turn_in  = int(usage_payload.get("prompt_tokens", 0))
+            stats.turn_out = int(usage_payload.get("completion_tokens", 0))
+            stats.session_in  += stats.turn_in
+            stats.session_out += stats.turn_out
+            stats.ctx_used = int(usage_payload.get("total_tokens", stats.ctx_used))
+        live.update(render())
+
+    console.print(turn_footer())
     return "".join(chunks)
 
 # ── Main REPL ───────────────────────────────────────────────────────────────
-def main() -> None:
+def header() -> None:
     console.rule(
-        "[bold cyan]podroid-agent[/] · endpoint=" + ENDPOINT + " · model=" + MODEL
+        f"[bold cyan]podroid-agent[/]  ·  endpoint={ENDPOINT_BASE}  ·  "
+        f"model={MODEL}  ·  ctx={stats.ctx_max}",
     )
     console.print(
-        "[dim]Commands: /reset clear history · /save NAME · /load NAME · "
-        "/exit · Ctrl+D quit[/dim]"
+        "[dim]/reset clear history  ·  /save NAME  ·  /load NAME  ·  "
+        "/stats show session counters  ·  /exit  ·  Ctrl+D quit[/dim]"
     )
+
+def show_stats_table() -> None:
+    t = Table(title="Session statistics", show_header=False, border_style="dim")
+    t.add_row("Endpoint",       ENDPOINT_BASE)
+    t.add_row("Model",          MODEL)
+    t.add_row("Context window", f"{stats.ctx_max} tokens")
+    t.add_row("Context used",   f"{stats.ctx_used} tokens "
+                                f"({100*stats.ctx_used/max(stats.ctx_max,1):.1f}%)")
+    t.add_row("Session in",     f"{stats.session_in} tokens (prompt)")
+    t.add_row("Session out",    f"{stats.session_out} tokens (completion)")
+    console.print(t)
+
+def main() -> None:
+    stats.ctx_max = probe_context_window()
+    header()
     messages: list[dict] = [{"role": "system", "content": SYSTEM}]
 
     while True:
@@ -213,7 +362,11 @@ def main() -> None:
             return
         if user == "/reset":
             messages = [messages[0]]
+            stats.ctx_used = 0
             console.print("[dim](history cleared)[/dim]")
+            continue
+        if user == "/stats":
+            show_stats_table()
             continue
         if user.startswith("/save "):
             name = user[6:].strip() or "default"
@@ -232,9 +385,10 @@ def main() -> None:
 
         messages.append({"role": "user", "content": user})
 
-        # Tool-call loop: keep generating + executing until the model
-        # produces a plain-text reply with no tool calls.
-        for _ in range(8):  # max 8 tool calls per turn — runaway guard
+        # Tool-call loop — keep generating + executing until the model
+        # produces a plain reply with no tool calls. Hard-capped at 8
+        # iterations per turn to defuse runaway loops.
+        for _ in range(8):
             reply = stream_completion(messages)
             if not reply:
                 break
@@ -244,20 +398,23 @@ def main() -> None:
             if not parsed:
                 break
             tool, args, body = parsed
-            console.print(Panel(f"!{tool}: {args}",
-                                title="[cyan]tool call[/cyan]",
-                                border_style="cyan", expand=False))
+            console.print(Panel(
+                f"!{tool}: {args}" + (f"\n```\n{body[:200]}{'…' if len(body)>200 else ''}\n```" if body else ""),
+                title="[cyan]▶ tool call[/cyan]",
+                border_style="cyan", expand=False,
+            ))
+            t_tool = time.monotonic()
             result = execute_tool(tool, args, body)
-            console.print(Panel(result[:4000] + ("\n…[truncated]" if len(result) > 4000 else ""),
-                                title="[green]tool result[/green]",
-                                border_style="green", expand=False))
-            # Feed the result back as a user message — the simplest way
-            # that small models reliably understand. Schema-correct tool
-            # messages confuse them at 3 B–7 B Q4.
+            tool_dt = time.monotonic() - t_tool
+            display = result[:4000] + ("\n…[truncated]" if len(result) > 4000 else "")
+            console.print(Panel(
+                display,
+                title=f"[green]◀ tool result · {tool_dt:.2f}s[/green]",
+                border_style="green", expand=False,
+            ))
             messages.append({"role": "user", "content": f"tool result:\n{result}"})
 
-        # Trim history to keep context small. Keep system + last 2*MAX_TURNS
-        # messages (one user + one assistant per turn ≈ 2 messages).
+        # Trim history but always keep the system message.
         if len(messages) > 2 * MAX_TURNS + 1:
             messages = [messages[0]] + messages[-2 * MAX_TURNS:]
 
