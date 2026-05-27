@@ -123,8 +123,15 @@ class LlamaServerProcess @Inject constructor(
 
             val proc = pb.start()
             process = proc
-            _state.value = AiEngineState.Running(profile.modelId, effectiveBackend)
+            // Don't claim Running until the model is actually loaded —
+            // llama-server binds the port instantly but spends ~30-90 s
+            // loading a 7B model into RAM, during which /health returns
+            // 503 "Loading model". Bumping Settings to Running too early
+            // makes the user think Crush / aider should work when they
+            // still get Service Unavailable for the next minute.
+            _state.value = AiEngineState.Starting
             watcher = scope.launch { watch(proc, profile.modelId, effectiveBackend) }
+            scope.launch { waitForHealth(port, profile.modelId, effectiveBackend) }
             true
         }.getOrElse { e ->
             Log.e(TAG, "llama-server start failed", e)
@@ -148,6 +155,32 @@ class LlamaServerProcess @Inject constructor(
         watcher?.cancel()
         watcher = null
         _state.value = AiEngineState.Idle
+    }
+
+    /** Polls llama-server's /health endpoint every 2 s until it returns
+     *  HTTP 200 (model loaded, ready to serve). Until then the state stays
+     *  Starting so the Settings pill and notification accurately reflect
+     *  "loading" instead of a false Running. Gives up after ~3 minutes —
+     *  if a 7B model hasn't loaded by then something else is wrong. */
+    private suspend fun waitForHealth(port: Int, modelId: String, backend: AiBackend) {
+        val url = java.net.URL("http://127.0.0.1:$port/health")
+        val deadline = System.currentTimeMillis() + 180_000  // 3 minutes
+        while (System.currentTimeMillis() < deadline) {
+            if (_state.value !is AiEngineState.Starting) return  // crashed or stopped
+            val ok = runCatching {
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    connectTimeout = 1500
+                    readTimeout = 1500
+                }
+                try { conn.responseCode == 200 } finally { conn.disconnect() }
+            }.getOrDefault(false)
+            if (ok) {
+                _state.value = AiEngineState.Running(modelId, backend)
+                return
+            }
+            kotlinx.coroutines.delay(2000)
+        }
+        Log.w(TAG, "Model didn't reach /health=200 within 3 min — leaving state as Starting")
     }
 
     private suspend fun watch(p: Process, modelId: String, backend: AiBackend) {
