@@ -363,12 +363,13 @@ def turn_footer() -> Text:
     return f
 
 # ── Initialization warmup ──────────────────────────────────────────────────
-def warmup_engine() -> bool:
-    """Send a tiny ping to /v1/chat/completions so the model is loaded
-    into RAM before the user's first real prompt. Shows a live timer so
-    the user sees something is happening and the first 30-90s of model
-    load doesn't feel like a hang. Blocks all keyboard input until the
-    ping returns. Returns True on success."""
+def warmup_engine(system_msg: dict) -> bool:
+    """Pre-eval BOTH the model weights AND the system prompt before the
+    REPL accepts input. Sends a max_tokens=1 chat with the real system
+    message + a 1-char user message; with cache_prompt=true llama-server
+    keeps the resulting KV cache, so the user's first real turn only has
+    to evaluate their own message — typical 5-10 s instead of 60+ s on
+    phone CPU. Shows a live timer; returns True on success."""
     result: dict = {"done": False, "ok": False, "err": None,
                     "tokens_in": 0, "tokens_out": 0}
 
@@ -377,10 +378,14 @@ def warmup_engine() -> bool:
             r = requests.post(CHAT_URL, json={
                 "model": MODEL,
                 "stream": False,
-                "messages": [{"role": "user", "content": "."}],
+                "messages": [system_msg, {"role": "user", "content": "."}],
                 "max_tokens": 1,
                 "temperature": 0,
-            }, timeout=300)
+                # llama.cpp / llama-server custom extension — keep the
+                # evaluated prefix in the slot's KV cache so the next
+                # request with the same system prompt skips re-eval.
+                "cache_prompt": True,
+            }, timeout=600)
             result["ok"] = r.status_code == 200
             if r.status_code == 200:
                 u = r.json().get("usage") or {}
@@ -399,9 +404,10 @@ def warmup_engine() -> bool:
 
     def panel(elapsed: float) -> Panel:
         spin = Spinner("dots", text=Text.assemble(
-            ("Initializing AI engine — loading model into memory", "bold"),
+            ("Initializing AI engine — loading model + pre-evaluating system prompt", "bold"),
             ("\n", ""),
-            (f"This is a one-time cost per session. Typical first-load is 30–90s on phone CPU.\n", "dim"),
+            ("One-time cost per session. After this completes, your first real prompt\n", "dim"),
+            ("only has to evaluate your own message — usually 5–10 s instead of 60+.\n", "dim"),
             (f"Endpoint: {ENDPOINT_BASE}    Model: {MODEL}\n", "dim"),
             (f"Elapsed: {elapsed:.1f}s", "yellow bold"),
         ))
@@ -464,6 +470,11 @@ def stream_completion(messages: list[dict]) -> str:
         "messages": messages,
         "temperature": 0.3,
         "max_tokens": 2048,
+        # cache_prompt=true: llama-server's slot keeps the KV of the
+        # longest matching prefix of `messages`. With our stable
+        # system-prompt + warmup pre-eval, the first user turn skips
+        # the system-prompt eval (~600 tokens) entirely.
+        "cache_prompt": True,
     }
     stats.reset_turn()
     t0 = time.monotonic()
@@ -597,14 +608,17 @@ def main() -> None:
     install_sigwinch_handler()
     banner()
 
-    # Block all input until the model is actually loaded into RAM.
-    # First call to /v1/chat/completions triggers the model load
-    # (~30-90s for 7B on phone CPU); we eat that here so the user's
-    # first real prompt feels normal-speed.
-    if not warmup_engine():
+    # Build the system message ONCE here and feed it to the warmup so
+    # llama-server's slot KV cache holds the evaluated system prompt
+    # by the time the user's first turn arrives. Each turn will replace
+    # messages[0] with the freshly-computed system_prompt() in case cwd
+    # changed — but for the very first user turn, the prefix matches and
+    # the eval is reused.
+    initial_system = {"role": "system", "content": system_prompt()}
+    if not warmup_engine(initial_system):
         return
 
-    messages: list[dict] = [{"role": "system", "content": system_prompt()}]
+    messages: list[dict] = [initial_system]
 
     while True:
         try:
