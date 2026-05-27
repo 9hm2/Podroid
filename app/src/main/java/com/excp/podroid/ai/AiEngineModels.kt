@@ -135,6 +135,16 @@ object ModelCatalogue {
             description = "Good chat, output explanation, scripting. Z Fold 5 GPU ~12-15 tok/s.",
         ),
         ModelSpec(
+            id = "qwen2.5-coder-3b-q4",
+            displayName = "Qwen2.5-Coder 3B (code-tuned, fast)",
+            sizeMb = 1850,
+            ramRequiredMb = 3500,
+            recommendedContext = 8192,
+            downloadUrl = "https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_0.gguf",
+            sha256 = "",
+            description = "Code-tuned 3B; ~2-3× faster than the 7B on CPU. Best balance for Aider on Z Fold 5.",
+        ),
+        ModelSpec(
             id = "phi-3-mini-q4",
             displayName = "Phi-3 Mini 3.8B (quality)",
             sizeMb = 2280,

@@ -268,7 +268,15 @@ class LlamaServerProcess @Inject constructor(
         // -fa changed from flag-only to "--flash-attn <on|off|auto>" in b6000+.
         // Always pass the value explicitly so the parser doesn't greedily
         // consume the next arg (-ctk) as the value.
-        add("-fa"); add(if (profile.flashAttention) "on" else "off")
+        //
+        // Flash attention is a GPU-targeted optimisation; on pure CPU
+        // (NEON / AVX2) llama.cpp's "naive" attention is typically faster
+        // because FA shifts work into kernels that lean on tensor cores
+        // we don't have. Default to OFF for CPU regardless of the
+        // profile.flashAttention flag; GPU paths honour the user choice.
+        val faValue = if (backend == AiBackend.CPU) "off"
+                      else if (profile.flashAttention) "on" else "off"
+        add("-fa"); add(faValue)
         add("-ctk"); add(profile.kvCacheType.id)
         add("-ctv"); add(profile.kvCacheType.id)
         add("-b"); add(profile.batchSize.toString())

@@ -71,7 +71,8 @@ class AiEngineDetector @Inject constructor(
             threads = -1,
             flashAttention = true,
             kvCacheType = KvCacheType.F16,
-            batchSize = 512,
+            batchSize = 2048,        // bumped from 512 — prompt eval throughput
+                                     // grows almost linearly with batch on NEON.
             mmap = true,
             mlock = caps.totalRamGb >= 12,
         )
@@ -84,7 +85,7 @@ class AiEngineDetector @Inject constructor(
             threads = -1,
             flashAttention = true,
             kvCacheType = KvCacheType.F16,
-            batchSize = 256,
+            batchSize = 1024,        // up from 256
             mmap = true,
             mlock = false,
         )
@@ -96,7 +97,7 @@ class AiEngineDetector @Inject constructor(
             threads = 4,
             flashAttention = false,
             kvCacheType = KvCacheType.Q8_0,
-            batchSize = 128,
+            batchSize = 512,
             mmap = true,
             mlock = false,
         )
