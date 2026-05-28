@@ -68,8 +68,19 @@ RUN set -e; \
         sleep $((attempt * 10)); \
         [ "$attempt" = "3" ] && { echo "FATAL: debootstrap failed 3×"; exit 1; }; \
     done
+
+# Second-stage with the standard chroot-friendliness fixes — Ubuntu noble's
+# package postinsts are stricter than Debian's and bail when invoke-rc.d
+# tries to start systemctl-managed services inside an unprivileged chroot.
+#   - policy-rc.d returns 101 → invoke-rc.d treats every service start as
+#     denied without erroring (the chroot has no PID 1 to talk to).
+#   - DEBIAN_FRONTEND=noninteractive + LC_ALL=C → debconf uses its
+#     non-interactive frontend and locale doesn't matter.
 RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
- && chroot /work/rootfs /debootstrap/debootstrap --second-stage
+ && echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
+ && chmod +x /work/rootfs/usr/sbin/policy-rc.d \
+ && chroot /work/rootfs sh -c 'export DEBIAN_FRONTEND=noninteractive LC_ALL=C; /debootstrap/debootstrap --second-stage' \
+ && rm -f /work/rootfs/usr/sbin/policy-rc.d
 
 COPY --from=shared-builder /work/vsock-agent/podroid-vsock-agent /work/rootfs/usr/local/bin/podroid-vsock-agent
 COPY --from=shared-builder /work/host-bridge/podroid-hostd       /work/rootfs/usr/local/bin/podroid-hostd
