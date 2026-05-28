@@ -43,11 +43,10 @@ RUN zypper --root /work/rootfs --non-interactive --gpg-auto-import-keys \
         oss-aarch64 && \
     zypper --root /work/rootfs --non-interactive --gpg-auto-import-keys \
         install --no-recommends -y \
-            patterns-base-base \
-            systemd systemd-sysvinit dbus-1 \
+            systemd dbus-1 \
             openssh sudo shadow \
-            iproute2 iputils net-tools wicked \
-            iw wireless-tools rfkill wpa_supplicant \
+            iproute2 iputils net-tools \
+            iw wpa_supplicant \
             usbutils pciutils kmod bash-completion \
             less nano tmux screen \
             ca-certificates-mozilla glibc-locale-base && \

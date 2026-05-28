@@ -43,7 +43,15 @@ RUN wget --tries=5 --retry-connrefused --waitretry=10 -q \
 # (TigerVNC, PulseAudio) the base set doesn't include.
 RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
  && rm -f /work/rootfs/etc/resolv.conf \
- && cp /etc/resolv.conf /work/rootfs/etc/resolv.conf
+ && cp /etc/resolv.conf /work/rootfs/etc/resolv.conf \
+ # pacman's transaction commit reads /etc/mtab to figure out mount points;
+ # in the chroot it doesn't exist (and /proc isn't mounted in an
+ # unprivileged docker build), which makes pacman bail with
+ # "could not determine filesystem mount points". Symlink it to
+ # /proc/self/mounts so pacman gets an empty-but-valid file via qemu-user's
+ # /proc emulation; if /proc is missing too, the symlink reads as empty
+ # and pacman treats that as "no mounts here", which is also fine.
+ && ln -sf /proc/self/mounts /work/rootfs/etc/mtab
 
 RUN echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
  && chmod +x /work/rootfs/usr/sbin/policy-rc.d \

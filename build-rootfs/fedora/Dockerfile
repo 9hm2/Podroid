@@ -57,7 +57,7 @@ RUN mkdir -p /work/rootfs/etc/yum.repos.d && \
             systemd systemd-udev dbus-broker \
             openssh-server sudo passwd \
             iproute iputils net-tools dhcp-client \
-            iw wireless-tools rfkill wpa_supplicant \
+            iw rfkill wpa_supplicant \
             usbutils pciutils kmod bash-completion \
             less nano tmux screen \
             ca-certificates glibc-langpack-en \
