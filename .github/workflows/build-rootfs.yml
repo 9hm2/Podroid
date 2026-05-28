@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: Branch to build from
+        description: "Branch to build from (leave empty = use the branch picked above)"
         type: string
-        default: multi-vm
+        default: ""
       distros:
         description: "Distros to build (comma-separated). Options: alpine, debian, ubuntu, kali, arch, fedora, void"
         type: string
@@ -59,7 +59,7 @@ jobs:
         distro: ${{ fromJson(needs.prepare.outputs.distros) }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ inputs.branch }}" }
+        with: { ref: "${{ inputs.branch != '' && inputs.branch || github.ref_name }}" }
 
       - name: Free up runner disk
         run: |
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ inputs.branch }}" }
+        with: { ref: "${{ inputs.branch != '' && inputs.branch || github.ref_name }}" }
       - name: Download all rootfs artifacts
         uses: actions/download-artifact@v4
         with:
