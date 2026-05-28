@@ -18,9 +18,9 @@ on:
         type: string
         default: multi-vm
       distros:
-        description: "Distros to build (comma-separated). Options: alpine, debian, ubuntu, kali, arch, fedora, void"
+        description: "Distros to build (comma-separated). Options: alpine, debian, ubuntu, kali, parrot, fedora, arch, opensuse"
         type: string
-        default: alpine,debian,ubuntu
+        default: alpine,debian,ubuntu,kali,parrot,fedora,arch,opensuse
       release_tag:
         description: "Publish a Release with this tag (leave empty = artifacts only)"
         type: string
