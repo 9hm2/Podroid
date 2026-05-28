@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch to build from (leave empty = use the branch picked above)"
+        description: "Branch to build from (multi-vm is where the per-distro build dirs live)"
         type: string
-        default: ""
+        default: multi-vm
       distros:
         description: "Distros to build (comma-separated). Options: alpine, debian, ubuntu, kali, arch, fedora, void"
         type: string

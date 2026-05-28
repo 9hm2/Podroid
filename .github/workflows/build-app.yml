@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch to build (leave empty = use the branch picked in the Use workflow from dropdown)"
+        description: "Branch to build (defaults to multi-vm; override to build any other branch)"
         type: string
-        default: ""
+        default: multi-vm
       build_type:
         description: APK build type
         type: choice
