@@ -57,11 +57,19 @@ fun VmPickerRow(
     val vms by viewModel.vms.collectAsStateWithLifecycle()
     val activeId by viewModel.activeVmId.collectAsStateWithLifecycle()
 
-    var showAdd by remember { mutableStateOf(false) }
+    var showAddSourceChoice by remember { mutableStateOf(false) }
+    var showImport          by remember { mutableStateOf(false) }
+    var showDownload        by remember { mutableStateOf(false) }
     var actionTarget by remember { mutableStateOf<VmRecord?>(null) }
     var renameTarget by remember { mutableStateOf<VmRecord?>(null) }
 
-    if (showAdd) AddVmDialog(onDismiss = { showAdd = false })
+    if (showAddSourceChoice) AddSourceChoiceDialog(
+        onDismiss = { showAddSourceChoice = false },
+        onImport = { showAddSourceChoice = false; showImport = true },
+        onDownload = { showAddSourceChoice = false; showDownload = true },
+    )
+    if (showImport)   AddVmDialog(onDismiss = { showImport = false })
+    if (showDownload) DownloadVmDialog(onDismiss = { showDownload = false })
     actionTarget?.let { target ->
         VmActionSheet(
             vm = target,
@@ -104,7 +112,7 @@ fun VmPickerRow(
                 onLongPress = { actionTarget = vm },
             )
         }
-        AddVmTile(onClick = { showAdd = true })
+        AddVmTile(onClick = { showAddSourceChoice = true })
     }
 }
 
@@ -236,3 +244,32 @@ private fun RenameVmDialog(
 @OptIn(ExperimentalFoundationApi::class)
 private fun Modifier.combinedClickableOnTap(onClick: () -> Unit): Modifier =
     this.combinedClickable(onClick = onClick)
+
+@Composable
+private fun AddSourceChoiceDialog(
+    onDismiss: () -> Unit,
+    onImport: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a VM") },
+        text = {
+            Text(
+                "Bring a rootfs in from a file you already have, or pick one " +
+                    "from the project's latest GitHub Release.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDownload) { Text("Download…") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onImport) { Text("Import file…") }
+                Spacer(Modifier.width(4.dp))
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
+}

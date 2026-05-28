@@ -18,6 +18,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.excp.podroid.data.repository.RootfsCatalog
+import com.excp.podroid.data.repository.RootfsCatalogEntry
 import com.excp.podroid.data.repository.VmRecord
 import com.excp.podroid.data.repository.VmRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -47,7 +49,19 @@ sealed class ImportState {
 class VmManagementViewModel @Inject constructor(
     app: Application,
     private val registry: VmRegistry,
+    private val catalog: RootfsCatalog,
 ) : AndroidViewModel(app) {
+
+    // Catalog of rootfs files published in the latest GitHub Release. Lazy-fetched
+    // by the Download dialog when it opens; null until the first fetch resolves.
+    private val _catalog = MutableStateFlow<List<RootfsCatalogEntry>?>(null)
+    val rootfsCatalog: StateFlow<List<RootfsCatalogEntry>?> = _catalog.asStateFlow()
+
+    fun fetchCatalog() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _catalog.value = catalog.fetchLatest()
+        }
+    }
 
     val vms: StateFlow<List<VmRecord>> = registry.vms
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -136,6 +150,72 @@ class VmManagementViewModel @Inject constructor(
                 _importState.value = ImportState.Done(id, record.name)
             } catch (e: Exception) {
                 Log.e(TAG, "Import failed", e)
+                runCatching { dest.delete() }
+                runCatching { registry.vmDir(id).delete() }
+                _importState.value = ImportState.Failed(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    /**
+     * Streams a rootfs squashfs from a GitHub Release directly into the per-VM
+     * dir; identical state machine to import(), but the source is an HTTP
+     * stream instead of a SAF Uri. The same ImportState transitions drive the
+     * dialog's progress UI.
+     */
+    fun downloadAndImport(
+        entry: RootfsCatalogEntry,
+        name: String,
+        storageSizeGb: Int,
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _importState.value = ImportState.Copying(0L, entry.sizeBytes)
+            val id = VmRegistry.newId()
+            val dest = registry.rootfsFile(id)
+            try {
+                dest.parentFile?.mkdirs()
+                val conn = (java.net.URL(entry.downloadUrl).openConnection()
+                        as java.net.HttpURLConnection).apply {
+                    connectTimeout = 15000
+                    readTimeout = 30000
+                    instanceFollowRedirects = true
+                }
+                if (conn.responseCode !in 200..299) {
+                    throw IllegalStateException("HTTP ${conn.responseCode} from ${entry.downloadUrl}")
+                }
+                val total = conn.contentLengthLong.takeIf { it > 0 } ?: entry.sizeBytes
+                conn.inputStream.use { i ->
+                    dest.outputStream().use { o ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        var copied = 0L
+                        var read = i.read(buffer)
+                        var lastTick = System.currentTimeMillis()
+                        while (read >= 0) {
+                            o.write(buffer, 0, read)
+                            copied += read
+                            val now = System.currentTimeMillis()
+                            if (now - lastTick > 100) {
+                                _importState.value = ImportState.Copying(copied, total)
+                                lastTick = now
+                            }
+                            read = i.read(buffer)
+                        }
+                        o.flush()
+                    }
+                }
+                val record = VmRecord(
+                    id = id,
+                    name = name.ifBlank { defaultNameFor(entry.distro, entry.distroVersion) },
+                    distro = entry.distro,
+                    distroVersion = entry.distroVersion,
+                    initSystem = entry.initSystem,
+                    storageSizeGb = storageSizeGb,
+                    createdAtMs = System.currentTimeMillis(),
+                )
+                registry.add(record)
+                _importState.value = ImportState.Done(id, record.name)
+            } catch (e: Exception) {
+                Log.e(TAG, "Download failed for ${entry.filename}", e)
                 runCatching { dest.delete() }
                 runCatching { registry.vmDir(id).delete() }
                 _importState.value = ImportState.Failed(e.message ?: "Unknown error")
