@@ -121,12 +121,30 @@ build_initramfs() {
 }
 
 build_rootfs() {
-    log "Building Alpine rootfs squashfs..."
-    docker build -f "${SCRIPT_DIR}/build-rootfs/Dockerfile.rootfs" \
-        -t podroid-rootfs:latest \
-        --output type=local,dest="${ASSETS}" \
+    # Default to Alpine for the legacy `build-all.sh rootfs` call. For other
+    # distros, pass the distro name as the second arg, e.g.:
+    #   ./build-all.sh rootfs debian
+    # The CI workflow builds the same way via a matrix in build-rootfs.yml.
+    # $1 is "rootfs" (the subcommand); $2 is the distro override.
+    local distro="${2:-alpine}"
+    local outdir="${SCRIPT_DIR}/build-rootfs/out/${distro}"
+    log "Building ${distro} rootfs squashfs..."
+    mkdir -p "${outdir}"
+    docker build \
+        -f "${SCRIPT_DIR}/build-rootfs/${distro}/Dockerfile" \
+        -t "podroid-rootfs-${distro}:latest" \
+        --output "type=local,dest=${outdir}" \
         "${SCRIPT_DIR}/build-rootfs/"
-    success "Built ${ASSETS}/alpine-rootfs.squashfs ($(du -h "${ASSETS}/alpine-rootfs.squashfs" | cut -f1))"
+    # Each distro's Dockerfile emits a uniformly named /rootfs.squashfs;
+    # rename + copy into assets/ so the legacy single-VM dev flow still works
+    # (the multi-VM app never reads from assets anymore).
+    if [ -f "${outdir}/rootfs.squashfs" ]; then
+        local pretty="podroid-rootfs-${distro}-aarch64.squashfs"
+        mv "${outdir}/rootfs.squashfs" "${outdir}/${pretty}"
+        success "Built ${outdir}/${pretty} ($(du -h "${outdir}/${pretty}" | cut -f1))"
+    else
+        error "Build finished but ${outdir}/rootfs.squashfs is missing"
+    fi
 }
 
 build_qemu() {
@@ -245,7 +263,7 @@ for arg in "$@"; do [ "$arg" == "--fast" ] && FAST=true; done
 case "$1" in
     kernel)    build_kernel ;;
     initramfs) build_initramfs ;;
-    rootfs)    build_rootfs ;;
+    rootfs)    build_rootfs "$@" ;;
     qemu)      build_qemu ;;
     apk)       build_apk ;;
     deploy)    build_apk && deploy_apk ;;

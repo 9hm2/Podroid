@@ -75,3 +75,6 @@ app/src/main/jniLibs/
 
 # Visual companion (brainstorming sessions)
 .superpowers/
+
+# build-rootfs per-distro outputs
+/build-rootfs/out/

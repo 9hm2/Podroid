@@ -1,0 +1,120 @@
+name: Build rootfs
+
+# Manually-triggered multi-distro rootfs build. The matrix expands over the
+# `distros` input (comma-separated, e.g. "alpine,debian,ubuntu"); each job
+# cross-compiles the chosen distro's squashfs and uploads it as an artifact.
+# Optionally publishes a GitHub Release that bundles every selected rootfs.
+#
+# The APK build (.github/workflows/build-app.yml) is independent — rootfs
+# files do NOT ship inside the APK. Users either download from the Release
+# this workflow publishes, or build a single distro locally with
+# `./build-all.sh rootfs <distro>`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to build from
+        type: string
+        default: multi-vm
+      distros:
+        description: "Distros to build (comma-separated). Options: alpine, debian, ubuntu, kali, arch, fedora, void"
+        type: string
+        default: alpine,debian,ubuntu
+      release_tag:
+        description: "Publish a Release with this tag (leave empty = artifacts only)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  # Expand the comma-separated input into a JSON array for the matrix below.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      distros: ${{ steps.set.outputs.distros }}
+    steps:
+      - id: set
+        run: |
+          # Trim spaces and split into a JSON array. Whitespace-only entries
+          # are dropped (`grep .`) so a trailing comma in the input doesn't
+          # produce an empty matrix slot.
+          arr=$(echo "${{ inputs.distros }}" \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep . \
+            | jq -R . | jq -s -c .)
+          echo "distros=$arr" >> "$GITHUB_OUTPUT"
+          echo "Will build: $arr"
+
+  rootfs:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ${{ fromJson(needs.prepare.outputs.distros) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.branch }}" }
+
+      - name: Free up runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.distro }} rootfs
+        run: |
+          mkdir -p build-rootfs/out/${{ matrix.distro }}
+          docker buildx build \
+            -f build-rootfs/${{ matrix.distro }}/Dockerfile \
+            --output type=local,dest=build-rootfs/out/${{ matrix.distro }} \
+            --progress=plain \
+            build-rootfs/
+
+      - name: Rename + verify
+        run: |
+          out=build-rootfs/out/${{ matrix.distro }}
+          test -f "$out/rootfs.squashfs" || { echo "::error::missing rootfs.squashfs"; exit 1; }
+          # The release-asset / SAF-import naming convention. The app's
+          # RootfsFileNameParser sniffs distro + version from this name.
+          pretty="podroid-rootfs-${{ matrix.distro }}-aarch64.squashfs"
+          mv "$out/rootfs.squashfs" "$out/$pretty"
+          ls -lh "$out/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.distro }}
+          path: build-rootfs/out/${{ matrix.distro }}/*.squashfs
+          if-no-files-found: error
+
+  release:
+    if: inputs.release_tag != ''
+    needs: rootfs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.branch }}" }
+      - name: Download all rootfs artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: rootfs-*
+          merge-multiple: true
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -lh artifacts/
+          gh release create "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ inputs.branch }}" \
+            --title "Podroid rootfs ${{ inputs.release_tag }}" \
+            --generate-notes \
+            artifacts/*.squashfs
