@@ -33,8 +33,7 @@ RUN mkdir -p /work/rootfs && \
         https://download.opensuse.org/ports/aarch64/tumbleweed/repo/oss/ \
         oss-aarch64 && \
     zypper --root /work/rootfs --non-interactive --gpg-auto-import-keys \
-        --no-recommends \
-        install --no-confirm \
+        install --no-recommends -y \
             patterns-base-base \
             systemd systemd-sysvinit dbus-1 \
             openssh sudo shadow \

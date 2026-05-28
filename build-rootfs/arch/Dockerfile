@@ -51,8 +51,17 @@ RUN echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
         # before any package install will verify signatures.
         pacman-key --init && \
         pacman-key --populate archlinuxarm && \
-        pacman -Syu --noconfirm && \
-        pacman -S --noconfirm --needed \
+        # Pacman 7+ wants a Landlock sandbox per download user; GitHub
+        # runners ship a kernel without Landlock support and the alpm
+        # user does not exist in the chroot either. Switch the sandbox
+        # off globally for this build via pacman.conf so the flag does
+        # not need repeating on every pacman invocation.
+        sed -i "s/^#\\?NoProgressBar/NoProgressBar/; \
+                s/^#\\?DisableSandbox/DisableSandbox/" /etc/pacman.conf; \
+        grep -q "^DisableSandbox" /etc/pacman.conf || \
+            echo "DisableSandbox" >> /etc/pacman.conf; \
+        pacman -Syu --noconfirm --disable-sandbox && \
+        pacman -S --noconfirm --needed --disable-sandbox \
             base systemd systemd-sysvcompat dbus \
             openssh sudo \
             iproute2 iputils inetutils \

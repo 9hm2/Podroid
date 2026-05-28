@@ -25,11 +25,25 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 
 WORKDIR /work
 
-# Install the cross-arch rootfs in one pass. --forcearch=aarch64 makes dnf
-# pull aarch64 RPMs into /work/rootfs even though the host is x86_64; the
-# scriptlets run at first boot of the guest, not here, so no qemu-user
-# binfmt dance like debootstrap needs.
-RUN mkdir -p /work/rootfs && \
+# Bootstrap repo config explicitly into the installroot. dnf5 doesn't
+# carry the host's /etc/yum.repos.d/ across to --installroot, and the
+# default config has no enabled repos pointing at aarch64 mirrors. Write
+# minimal fedora + updates repos pointed at the Everything tree so dnf
+# can resolve the package set below.
+RUN mkdir -p /work/rootfs/etc/yum.repos.d && \
+    cat > /work/rootfs/etc/yum.repos.d/fedora.repo <<EOF && \
+[fedora]
+name=Fedora ${FEDORA_RELEASE} - aarch64
+baseurl=https://download.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_RELEASE}/Everything/aarch64/os/
+enabled=1
+gpgcheck=0
+
+[fedora-updates]
+name=Fedora ${FEDORA_RELEASE} - aarch64 - Updates
+baseurl=https://download.fedoraproject.org/pub/fedora/linux/updates/${FEDORA_RELEASE}/Everything/aarch64/
+enabled=1
+gpgcheck=0
+EOF
     dnf --installroot=/work/rootfs \
         --releasever=${FEDORA_RELEASE} \
         --forcearch=aarch64 \

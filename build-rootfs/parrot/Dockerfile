@@ -28,10 +28,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /work
 
-# Parrot archive signing key.
-RUN wget -qO parrot-key.asc \
-        https://archive.parrotsec.org/parrot/misc/parrotsec.gpg \
- && gpg --dearmor < parrot-key.asc > /work/parrot-archive-keyring.gpg
+# Parrot archive signing key. archive.parrotsec.org went away; deb.parrot.sh
+# ships the dearmored keyring as a Release-time artifact under /dists/<suite>/.
+# Fall back to fetching the .deb if the bare keyring URL ever 404s. The
+# parrot-archive-keyring deb package contains the keyring at
+# /usr/share/keyrings/parrot-archive-keyring.gpg.
+RUN set -e; \
+    if wget --tries=5 --waitretry=5 -q -O /work/parrot-archive-keyring.gpg \
+        https://deb.parrot.sh/parrot/parrot-archive-keyring.gpg; then \
+        echo "got keyring directly from deb.parrot.sh"; \
+    else \
+        echo "direct keyring URL failed; pulling parrot-archive-keyring deb"; \
+        apt-get update && \
+        apt-get download parrot-archive-keyring 2>/dev/null || true; \
+        deb=$(ls parrot-archive-keyring*.deb 2>/dev/null | head -1); \
+        if [ -z "$deb" ]; then \
+            # Last resort — grab the latest deb from the pool by filename glob.
+            wget --tries=5 --waitretry=5 -q -r --no-parent --no-directories \
+                --accept '*.deb' \
+                https://deb.parrot.sh/parrot/pool/main/p/parrot-archive-keyring/ \
+                -P /tmp/parrot-keys/; \
+            deb=$(ls /tmp/parrot-keys/parrot-archive-keyring*.deb 2>/dev/null | head -1); \
+        fi; \
+        [ -n "$deb" ] || { echo "FATAL: parrot-archive-keyring deb not found"; exit 1; }; \
+        dpkg-deb -x "$deb" /tmp/parrot-keyring/; \
+        cp /tmp/parrot-keyring/usr/share/keyrings/parrot-archive-keyring.gpg \
+            /work/parrot-archive-keyring.gpg; \
+    fi; \
+    test -s /work/parrot-archive-keyring.gpg
 
 # Plant a 'parrot' symlink to debian's 'sid' script — debootstrap on
 # bookworm doesn't know parrot suite names.
