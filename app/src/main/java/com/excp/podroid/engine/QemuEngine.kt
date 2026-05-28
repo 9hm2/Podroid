@@ -90,6 +90,10 @@ class QemuEngine @Inject constructor(
     val serialSockPath: String get() = "${context.filesDir.absolutePath}/serial.sock"
     val terminalSockPath: String get() = "${context.filesDir.absolutePath}/terminal.sock"
     val ctrlSockPath: String get() = "${context.filesDir.absolutePath}/ctrl.sock"
+    // Extra virtio-console terminal channels (hvc2, hvc3) for in-app multi-tab.
+    // Gettys are wired up in the rootfs via inittab/serial-getty@hvc2/3.
+    val term1SockPath: String get() = "${context.filesDir.absolutePath}/term1.sock"
+    val term2SockPath: String get() = "${context.filesDir.absolutePath}/term2.sock"
     val hostSockPath: String get() = "${context.filesDir.absolutePath}/host.sock"
 
     /**
