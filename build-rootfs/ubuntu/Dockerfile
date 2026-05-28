@@ -32,6 +32,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates wget gnupg openssl squashfs-tools \
  && rm -rf /var/lib/apt/lists/*
 
+# Debian bookworm's debootstrap 1.0.128 predates every Ubuntu release after
+# jammy. All newer Ubuntu suites share the same minimal debootstrap script
+# as 'gutsy' (the Ubuntu base script everyone else symlinks to anyway in
+# upstream debootstrap), so plant the symlinks ourselves. Saves us from
+# pinning a newer debootstrap from backports / sid. Covers noble (24.04 LTS),
+# oracular (24.10), plucky (25.04), questing (25.10).
+RUN cd /usr/share/debootstrap/scripts \
+ && for suite in noble oracular plucky questing; do \
+        [ -e "$suite" ] || ln -sf gutsy "$suite"; \
+    done
+
 WORKDIR /work
 
 # Ubuntu archive signing key — required by debootstrap when using the

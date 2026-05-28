@@ -32,6 +32,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates wget gnupg openssl squashfs-tools \
  && rm -rf /var/lib/apt/lists/*
 
+# Debian bookworm's debootstrap 1.0.128 doesn't know about Debian releases
+# newer than itself (trixie/13, forky/14). All current Debian releases share
+# the same minimal debootstrap script as 'sid', so plant the symlinks. Saves
+# pinning a newer debootstrap from backports just for the suite name lookup.
+RUN cd /usr/share/debootstrap/scripts \
+ && for suite in trixie forky; do \
+        [ -e "$suite" ] || ln -sf sid "$suite"; \
+    done
+
 WORKDIR /work
 
 # Two-stage debootstrap (foreign + second-stage with qemu-user) is required
