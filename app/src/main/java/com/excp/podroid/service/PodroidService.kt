@@ -322,13 +322,10 @@ class PodroidService : Service() {
                         rules.add(com.excp.podroid.data.repository.PortForwardRule(X11Constants.AUDIO_PORT, X11Constants.AUDIO_PORT, "tcp"))
                     }
 
+                    // Active VM is required by start(); a null falls through to
+                    // the engine which sets state to Error so the UI can show
+                    // the picker / import flow.
                     val activeVm = vmRegistry.activeSnapshot()
-                        ?: run {
-                            // No imported VM — surface a state the UI can react
-                            // to (Home screen offers the picker / import flow).
-                            engine.stop()
-                            return@withContext
-                        }
                     val config = VmConfig(
                         ramMb = settingsRepository.getVmRamMbSnapshot(),
                         cpus = settingsRepository.getVmCpusSnapshot(),
@@ -342,7 +339,7 @@ class PodroidService : Service() {
                         usbPassthroughEnabled = settingsRepository.getUsbPassthroughEnabledSnapshot(),
                         vmRecord = activeVm,
                     )
-                    vmRegistry.markUsed(activeVm.id)
+                    if (activeVm != null) vmRegistry.markUsed(activeVm.id)
                     serviceScope.launch { observeStateForHostBridge() }
                     if (config.usbPassthroughEnabled) {
                         serviceScope.launch { observeStateForUsb() }
