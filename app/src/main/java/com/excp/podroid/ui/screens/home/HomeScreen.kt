@@ -135,6 +135,7 @@ fun HomeScreen(
                         if (showAvfHint) {
                             AvfHintBanner(onDismiss = { viewModel.dismissAvfHint() })
                         }
+                        com.excp.podroid.ui.vm.VmPickerRow(vmRunning = isRunning || isStarting)
                         HomeStatusBlock(isStarting, isRunning, vmState, bootStage, meta, uptimeLabel)
                         HomeDataSection(isRunning, vmState, meta, phoneIp)
                     }
@@ -167,6 +168,7 @@ fun HomeScreen(
                     if (showAvfHint) {
                         AvfHintBanner(onDismiss = { viewModel.dismissAvfHint() })
                     }
+                    com.excp.podroid.ui.vm.VmPickerRow(vmRunning = isRunning || isStarting)
                     HomeStatusBlock(isStarting, isRunning, vmState, bootStage, meta, uptimeLabel)
                     HomeDataSection(isRunning, vmState, meta, phoneIp)
                     Spacer(Modifier.weight(1f))
