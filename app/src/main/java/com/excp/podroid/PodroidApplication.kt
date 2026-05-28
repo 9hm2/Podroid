@@ -2,8 +2,12 @@
  * Podroid - Rootless Podman for Android
  * Copyright (C) 2024-2026 Podroid contributors
  *
- * Application class — extracts QEMU, kernel, and initrd assets on first run
- * (and on app upgrade when an asset's size changes).
+ * Application class — extracts the QEMU binaries, kernel and initramfs to
+ * filesDir on first run (and on app upgrade when the install stamp changes).
+ *
+ * Rootfs squashfs files are NOT bundled with the APK — they're imported per-VM
+ * via the SAF picker or the GitHub-Release downloader and live under
+ * filesDir/vms/<id>/rootfs.squashfs. See VmRegistry.
  */
 package com.excp.podroid
 
@@ -90,17 +94,22 @@ class PodroidApplication : Application() {
             // can't accumulate or shadow a fresh atomic write.
             deleteStaleTmpFiles(filesDir)
 
-            // Fan out the four top-level extractions across a small thread pool.
-            // Disk-write throughput is the bottleneck for the squashfs (~225 MB),
-            // but decompression, asset-FD lookup, and skip-when-size-matches all
-            // overlap usefully across threads. Runs on a background coroutine
-            // (not the main thread); the VM launch path awaits awaitAssetsReady.
+            // Fan out the three top-level extractions across a small thread pool.
+            // These are the APK-bundled host assets used by every VM (the kernel,
+            // initramfs, and QEMU runtime + BIOS/keymaps); the per-VM rootfs is
+            // imported separately by VmRegistry.
             val tasks: List<() -> Unit> = listOf(
                 { copyAssetDir("qemu", filesDir, forceCopy) },
                 { copyAssetIfNeeded("vmlinuz-virt", filesDir, forceCopy) },
                 { copyAssetIfNeeded("initrd.img", filesDir, forceCopy) },
-                { copyAssetIfNeeded("alpine-rootfs.squashfs", filesDir, forceCopy) },
             )
+
+            // Legacy migration: pre-multi-VM builds extracted alpine-rootfs.squashfs
+            // here and stored a single storage.img beside it. The new code never
+            // reads those paths — delete the squashfs to reclaim ~225 MB.
+            // VmRegistry handles importing the rootfs as a real VM record on
+            // first launch.
+            runCatching { File(filesDir, "alpine-rootfs.squashfs").delete() }
             val pool = Executors.newFixedThreadPool(tasks.size.coerceAtMost(4))
             try {
                 // invokeAll blocks until every Callable finishes (or times out).

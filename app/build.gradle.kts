@@ -98,6 +98,16 @@ android {
             useLegacyPackaging = true
         }
     }
+
+    // Rootfs squashfs files are NEVER bundled with the APK. They live under
+    // build-rootfs/ and ship via the GitHub Release / SAF-import path so users
+    // can pick a distro independently of the APK. A stray copy under
+    // src/main/assets/ would silently bloat every release by ~200 MB; tell
+    // AAPT to ignore them so a forgotten file from an old `build-all.sh rootfs`
+    // run can never get packaged.
+    androidResources {
+        ignoreAssetsPatterns += listOf("*.squashfs", "*-rootfs.*")
+    }
 }
 
 dependencies {
