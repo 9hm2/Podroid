@@ -118,6 +118,9 @@
     <string name="step_2_of_4">第 2 步，共 4 步</string>
     <string name="step_3_of_4">第 3 步，共 4 步</string>
     <string name="step_4_of_4">第 4 步，共 4 步</string>
+    <string name="step_1_of_3">第 1 步，共 3 步</string>
+    <string name="step_2_of_3">第 2 步，共 3 步</string>
+    <string name="step_3_of_3">第 3 步，共 3 步</string>
 
     <!-- Dialogs -->
     <string name="update_available">有新版本可用</string>

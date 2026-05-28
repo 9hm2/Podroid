@@ -27,7 +27,6 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,7 +56,7 @@ fun AddVmDialog(
     var distro      by remember { mutableStateOf("") }
     var version     by remember { mutableStateOf("") }
     var initSystem  by remember { mutableStateOf("openrc") }
-    var storageGb   by remember { mutableIntStateOf(8) }
+    var storageGb   by remember { mutableIntStateOf(DefaultStorageSizeGb) }
 
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val picker = rememberLauncherForActivityResult(
@@ -169,18 +168,18 @@ fun AddVmDialog(
                 }
 
                 Column {
-                    Text("Persistent storage: ${storageGb} GB",
+                    Text(
+                        "Persistent storage",
                         style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium)
-                    Slider(
-                        value = storageGb.toFloat(),
-                        onValueChange = { storageGb = it.toInt() },
-                        valueRange = 1f..64f,
-                        steps = 62,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    StorageSizeChips(
+                        selectedGb = storageGb,
+                        onSelect = { storageGb = it },
                         enabled = !busy,
                     )
                     Text(
-                        "Cannot be resized later; ext4 image grows up to this on use.",
+                        "Fixed at import; ext4 image grows up to this on use, can't be shrunk later.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

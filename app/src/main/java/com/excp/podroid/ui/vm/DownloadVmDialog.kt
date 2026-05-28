@@ -28,7 +28,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -58,7 +57,7 @@ fun DownloadVmDialog(
 
     var selected by remember { mutableStateOf<RootfsCatalogEntry?>(null) }
     var name      by remember { mutableStateOf("") }
-    var storageGb by remember { mutableIntStateOf(8) }
+    var storageGb by remember { mutableIntStateOf(DefaultStorageSizeGb) }
 
     // Trigger the fetch the first time the dialog is shown.
     LaunchedEffect(Unit) {
@@ -135,14 +134,14 @@ fun DownloadVmDialog(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Column {
-                            Text("Persistent storage: ${storageGb} GB",
+                            Text(
+                                "Persistent storage",
                                 style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium)
-                            Slider(
-                                value = storageGb.toFloat(),
-                                onValueChange = { storageGb = it.toInt() },
-                                valueRange = 1f..64f,
-                                steps = 62,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            StorageSizeChips(
+                                selectedGb = storageGb,
+                                onSelect = { storageGb = it },
                                 enabled = !busy,
                             )
                         }

@@ -118,6 +118,10 @@
     <string name="step_2_of_4">Step 2 of 4</string>
     <string name="step_3_of_4">Step 3 of 4</string>
     <string name="step_4_of_4">Step 4 of 4</string>
+    <!-- Multi-VM setup is 3 steps (storage size moved to per-VM import). -->
+    <string name="step_1_of_3">Step 1 of 3</string>
+    <string name="step_2_of_3">Step 2 of 3</string>
+    <string name="step_3_of_3">Step 3 of 3</string>
 
     <!-- Dialogs -->
     <string name="update_available">Update available</string>

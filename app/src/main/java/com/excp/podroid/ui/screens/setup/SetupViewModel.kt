@@ -38,14 +38,15 @@ class SetupViewModel @Inject constructor(
      * kill mid-write can't leave the app in a half-completed setup state.
      */
     fun completeSetup(
-        storageSizeGb: Int,
         sshEnabled: Boolean,
         storageAccessEnabled: Boolean,
         usbPassthroughEnabled: Boolean,
     ) {
         viewModelScope.launch {
+            // Storage size is no longer a setup-time global — it's picked at
+            // VM-import time (per-VM in VmRegistry). KEY_STORAGE_GB stays in
+            // SettingsRepository as the default for the import slider, untouched here.
             context.dataStore.edit { prefs ->
-                prefs[SettingsRepository.KEY_STORAGE_GB] = storageSizeGb
                 prefs[SettingsRepository.KEY_SSH_ENABLED] = sshEnabled
                 prefs[SettingsRepository.KEY_STORAGE_ACCESS_ENABLED] = storageAccessEnabled
                 prefs[SettingsRepository.KEY_USB_PASSTHROUGH_ENABLED] = usbPassthroughEnabled

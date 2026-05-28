@@ -18,8 +18,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,20 +29,17 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.windowsizeclass.WindowHeightSizeClass
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,12 +60,9 @@ import com.excp.podroid.ui.components.PodroidListRow
 import com.excp.podroid.ui.components.PodroidPrimaryButton
 import com.excp.podroid.ui.components.PodroidSectionLabel
 import com.excp.podroid.ui.components.PodroidSwitch
-import com.excp.podroid.ui.components.PodroidChipColors
 import com.excp.podroid.ui.theme.PodroidTokens
 import kotlinx.coroutines.launch
 
-private val storageSizes = listOf(2, 4, 8, 16, 32, 64)
-private const val DEFAULT_STORAGE_GB = 8
 
 @Composable
 fun SetupScreen(
@@ -81,13 +73,12 @@ fun SetupScreen(
     val context = LocalContext.current
     // rememberSaveable preserves wizard choices through config changes (rotation, font-scale, etc.)
     // so a mid-wizard rotation doesn't silently reset storage to 8 GB (not resizable later).
-    var selectedGb by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_GB) }
     var sshEnabled by rememberSaveable { mutableStateOf(true) }
     var storageAccessEnabled by rememberSaveable { mutableStateOf(false) }
     var usbPassthroughEnabled by rememberSaveable { mutableStateOf(false) }
     val usbPassthroughAvailable = remember { viewModel.usbPassthroughAvailable() }
     val setupComplete by viewModel.setupComplete.collectAsStateWithLifecycle()
-    val pagerState = rememberPagerState(pageCount = { 4 })
+    val pagerState = rememberPagerState(pageCount = { 3 })
     val scope = rememberCoroutineScope()
 
     // Request the notification permission BEFORE navigating away; using
@@ -135,7 +126,7 @@ fun SetupScreen(
         ) {
             // Step progress bar
             LinearProgressIndicator(
-                progress = { (pagerState.currentPage + 1) / 4f },
+                progress = { (pagerState.currentPage + 1) / 3f },
                 modifier = Modifier.fillMaxWidth(),
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
@@ -147,20 +138,17 @@ fun SetupScreen(
                 userScrollEnabled = false,
             ) { page ->
                 when (page) {
-                    0 -> StoragePage(
-                        windowSizeClass = windowSizeClass,
-                        selectedGb = selectedGb,
-                        onSelect = { selectedGb = it },
-                        onNext = { scope.launch { pagerState.animateScrollToPage(1) } },
-                    )
-                    1 -> VmConfigPage(
+                    // Page 0 used to be a global "persistent storage size" chooser;
+                    // multi-vm makes storage a per-VM choice picked at import time
+                    // (AddVmDialog / DownloadVmDialog), so it's gone from setup.
+                    0 -> VmConfigPage(
                         windowSizeClass = windowSizeClass,
                         sshEnabled = sshEnabled,
                         onSshToggle = { sshEnabled = it },
-                        onBack = { scope.launch { pagerState.animateScrollToPage(0) } },
-                        onNext = { scope.launch { pagerState.animateScrollToPage(2) } },
+                        onBack = null,
+                        onNext = { scope.launch { pagerState.animateScrollToPage(1) } },
                     )
-                    2 -> StorageAccessPage(
+                    1 -> StorageAccessPage(
                         windowSizeClass = windowSizeClass,
                         storageAccessEnabled = storageAccessEnabled,
                         onStorageAccessToggle = { enabled ->
@@ -187,18 +175,17 @@ fun SetupScreen(
                                 )
                             }
                         },
-                        onBack = { scope.launch { pagerState.animateScrollToPage(1) } },
-                        onNext = { scope.launch { pagerState.animateScrollToPage(3) } },
+                        onBack = { scope.launch { pagerState.animateScrollToPage(0) } },
+                        onNext = { scope.launch { pagerState.animateScrollToPage(2) } },
                     )
-                    3 -> UsbPassthroughPage(
+                    2 -> UsbPassthroughPage(
                         windowSizeClass = windowSizeClass,
                         usbPassthroughEnabled = usbPassthroughEnabled,
                         available = usbPassthroughAvailable,
                         onUsbPassthroughToggle = { usbPassthroughEnabled = it },
-                        onBack = { scope.launch { pagerState.animateScrollToPage(2) } },
+                        onBack = { scope.launch { pagerState.animateScrollToPage(1) } },
                         onGetStarted = {
                             viewModel.completeSetup(
-                                storageSizeGb = selectedGb,
                                 sshEnabled = sshEnabled,
                                 storageAccessEnabled = storageAccessEnabled,
                                 usbPassthroughEnabled = usbPassthroughEnabled && usbPassthroughAvailable,
@@ -216,7 +203,7 @@ fun SetupScreen(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                repeat(4) { index ->
+                repeat(3) { index ->
                     val isSelected = pagerState.currentPage == index
                     val dotWidth by animateDpAsState(
                         targetValue = if (isSelected) 24.dp else 8.dp,
@@ -326,45 +313,23 @@ private fun SetupPageLayout(
     }
 }
 
-// ── Page 1: Storage ───────────────────────────────────────────────────────────
+// Storage-size page used to live here — multi-vm makes storage a per-VM
+// choice picked at AddVmDialog / DownloadVmDialog time, so it's gone. The
+// reusable chip widget lives in ui/vm/StorageSizeChips.kt now.
 
-@Composable
-private fun StoragePage(
-    windowSizeClass: WindowSizeClass,
-    selectedGb: Int,
-    onSelect: (Int) -> Unit,
-    onNext: () -> Unit,
-) {
-    SetupPageLayout(
-        windowSizeClass = windowSizeClass,
-        stepLabel  = stringResource(R.string.step_1_of_4),
-        title      = stringResource(R.string.persistent_storage),
-        description = stringResource(R.string.storage_description),
-        bottomBar  = { SetupNextBar(onNext = onNext) },
-    ) {
-        Text(
-            text = "$selectedGb GB",
-            style = MaterialTheme.typography.displayLarge,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Spacer(Modifier.height(PodroidTokens.Spacing.MD))
-        StorageSizeChips(selectedGb, onSelect)
-    }
-}
-
-// ── Page 2: VM config + SSH ───────────────────────────────────────────────────
+// ── Page 1: VM config + SSH ───────────────────────────────────────────────────
 
 @Composable
 private fun VmConfigPage(
     windowSizeClass: WindowSizeClass,
     sshEnabled: Boolean,
     onSshToggle: (Boolean) -> Unit,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
     onNext: () -> Unit,
 ) {
     SetupPageLayout(
         windowSizeClass = windowSizeClass,
-        stepLabel  = stringResource(R.string.step_2_of_4),
+        stepLabel  = stringResource(R.string.step_1_of_3),
         title      = stringResource(R.string.configure_vm),
         description = stringResource(R.string.vm_config_description),
         bottomBar  = { SetupNavBar(onBack = onBack, onNext = onNext, nextLabel = stringResource(R.string.continue_label)) },
@@ -407,7 +372,7 @@ private fun StorageAccessPage(
 
     SetupPageLayout(
         windowSizeClass = windowSizeClass,
-        stepLabel  = stringResource(R.string.step_3_of_4),
+        stepLabel  = stringResource(R.string.step_2_of_3),
         title      = stringResource(R.string.downloads_sharing),
         description = stringResource(R.string.storage_access_description),
         bottomBar  = { SetupNavBar(onBack = onBack, onNext = onNext, nextLabel = stringResource(R.string.continue_label)) },
@@ -451,7 +416,7 @@ private fun UsbPassthroughPage(
 ) {
     SetupPageLayout(
         windowSizeClass = windowSizeClass,
-        stepLabel  = stringResource(R.string.step_4_of_4),
+        stepLabel  = stringResource(R.string.step_3_of_3),
         title      = stringResource(R.string.usb_passthrough),
         description = stringResource(R.string.usb_passthrough_description),
         bottomBar  = { SetupNavBar(onBack = onBack, onNext = onGetStarted, nextLabel = stringResource(R.string.get_started)) },
@@ -483,15 +448,8 @@ private fun UsbPassthroughPage(
 // ── Setup bottom bars ─────────────────────────────────────────────────────────
 
 @Composable
-private fun SetupNextBar(onNext: () -> Unit) {
-    Column(modifier = Modifier.padding(vertical = PodroidTokens.Spacing.LG)) {
-        PodroidPrimaryButton(text = stringResource(R.string.continue_label), onClick = onNext)
-    }
-}
-
-@Composable
 private fun SetupNavBar(
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
     onNext: () -> Unit,
     nextLabel: String,
 ) {
@@ -501,34 +459,10 @@ private fun SetupNavBar(
             .padding(vertical = PodroidTokens.Spacing.LG),
         horizontalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.SM),
     ) {
-        PodroidGhostButton(text = stringResource(R.string.back), onClick = onBack, modifier = Modifier.weight(1f))
+        if (onBack != null) {
+            PodroidGhostButton(text = stringResource(R.string.back), onClick = onBack, modifier = Modifier.weight(1f))
+        }
         PodroidPrimaryButton(text = nextLabel, onClick = onNext, modifier = Modifier.weight(2f))
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun StorageSizeChips(selectedGb: Int, onSelect: (Int) -> Unit) {
-    FlowRow(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        maxItemsInEachRow = 3,
-    ) {
-        storageSizes.forEach { gb ->
-            FilterChip(
-                selected = gb == selectedGb,
-                onClick = { onSelect(gb) },
-                label = {
-                    Text(
-                        text = "$gb GB",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = if (gb == selectedGb) FontWeight.Bold else FontWeight.Normal,
-                    )
-                },
-                shape = RoundedCornerShape(16.dp),
-                colors = PodroidChipColors(),
-            )
-        }
-    }
-}
