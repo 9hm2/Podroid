@@ -12,9 +12,15 @@
 package com.excp.podroid
 
 import android.app.Application
+import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.excp.podroid.data.repository.LegacyVmMigrator
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.android.HiltAndroidApp
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,9 +47,26 @@ class PodroidApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         exemptHiddenApi()
-        // Extract off the main thread: the squashfs alone is ~225 MB and
-        // blocking onCreate on first install/upgrade would ANR the cold start.
-        appScope.launch { extractAssets() }
+        // Off the main thread: asset extraction (~30 MB kernel + initramfs +
+        // QEMU) and the one-shot legacy-VM migration both touch disk.
+        appScope.launch {
+            extractAssets()
+            // Migrate a pre-multi-VM install's filesDir/storage.img +
+            // alpine-rootfs.squashfs into vms/<new-id>/. Idempotent — does
+            // nothing once the VmRegistry has any VM in it.
+            runCatching {
+                EntryPointAccessors
+                    .fromApplication(this@PodroidApplication, MigratorEntryPoint::class.java)
+                    .legacyMigrator()
+                    .migrateIfNeeded()
+            }.onFailure { Log.w(TAG, "Legacy VM migration failed", it) }
+        }
+    }
+
+    @EntryPoint
+    @InstallIn(SingletonComponent::class)
+    interface MigratorEntryPoint {
+        fun legacyMigrator(): LegacyVmMigrator
     }
 
     /**
@@ -104,12 +127,6 @@ class PodroidApplication : Application() {
                 { copyAssetIfNeeded("initrd.img", filesDir, forceCopy) },
             )
 
-            // Legacy migration: pre-multi-VM builds extracted alpine-rootfs.squashfs
-            // here and stored a single storage.img beside it. The new code never
-            // reads those paths — delete the squashfs to reclaim ~225 MB.
-            // VmRegistry handles importing the rootfs as a real VM record on
-            // first launch.
-            runCatching { File(filesDir, "alpine-rootfs.squashfs").delete() }
             val pool = Executors.newFixedThreadPool(tasks.size.coerceAtMost(4))
             try {
                 // invokeAll blocks until every Callable finishes (or times out).

@@ -50,6 +50,7 @@ import javax.inject.Singleton
 class QemuEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settingsRepository: com.excp.podroid.data.repository.SettingsRepository,
+    private val vmRegistry: com.excp.podroid.data.repository.VmRegistry,
 ) : VmEngine {
     private val _state = MutableStateFlow<VmState>(VmState.Idle)
     override val state: StateFlow<VmState> = _state.asStateFlow()
@@ -300,7 +301,14 @@ class QemuEngine @Inject constructor(
             return
         }
 
-        ensureStorageImage(config.storageSizeGb)
+        val vm = config.vmRecord
+        if (vm == null) {
+            cleanedUp.set(true)
+            bootStartTime = 0L
+            _state.value = VmState.Error("No VM selected. Import or download a rootfs first.")
+            return
+        }
+        ensureStorageImage(vm.storageSizeGb, vmRegistry.storageFile(vm.id))
 
         _consoleText.value = ""
         _bootStage.value = "Starting QEMU..."
@@ -566,7 +574,11 @@ class QemuEngine @Inject constructor(
             Log.w(TAG, "Initrd not found!")
         }
 
-        val storagePath = File(context.filesDir, "storage.img")
+        // Per-VM storage and rootfs paths. config.vmRecord is non-null here:
+        // start() returns early upthread when it's missing, so a null at this
+        // point would be a bug.
+        val vmId = config.vmRecord!!.id
+        val storagePath = vmRegistry.storageFile(vmId)
         if (storagePath.exists()) {
             // Single dedicated iothread for the writable disk. Multi-iothread
             // fan-out via `iothread-vq-mapping` requires `-device <full-json>`
@@ -583,7 +595,7 @@ class QemuEngine @Inject constructor(
             args += "-drive";  args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw,cache=writeback,aio=threads,discard=unmap,detect-zeroes=unmap"
         }
 
-        val rootfsImg = File(context.filesDir, "alpine-rootfs.squashfs")
+        val rootfsImg = vmRegistry.rootfsFile(vmId)
         if (rootfsImg.exists()) {
             // Dedicated iothread for the read-only squashfs so its decompression
             // reads don't queue behind storage.img writes on iothread0.
@@ -673,21 +685,24 @@ class QemuEngine @Inject constructor(
         }
     }
 
-    private fun ensureStorageImage(storageSizeGb: Int) {
-        val storageFile = File(context.filesDir, "storage.img")
+    private fun ensureStorageImage(storageSizeGb: Int, storageFile: File) {
         val desiredBytes = storageSizeGb.toLong() * 1024L * 1024L * 1024L
+        storageFile.parentFile?.mkdirs()
 
         if (storageFile.exists()) {
             if (storageFile.length() == desiredBytes) return
-            Log.d(TAG, "storage.img size mismatch — recreating")
+            // Per-VM storage size is set at import time and isn't a user-tunable
+            // value while the VM exists. A mismatch on disk means a partial
+            // write got truncated, or someone tampered — recreate.
+            Log.d(TAG, "${storageFile.name} size mismatch — recreating")
             storageFile.delete()
         }
 
         try {
             java.io.RandomAccessFile(storageFile, "rw").use { it.setLength(desiredBytes) }
-            Log.d(TAG, "Created storage.img (${storageSizeGb}GB)")
+            Log.d(TAG, "Created ${storageFile.name} (${storageSizeGb}GB)")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create storage.img", e)
+            Log.e(TAG, "Failed to create ${storageFile.name}", e)
         }
     }
 

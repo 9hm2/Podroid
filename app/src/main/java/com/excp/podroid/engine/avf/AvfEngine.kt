@@ -52,6 +52,7 @@ import javax.inject.Singleton
 class AvfEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     @Suppress("UnusedPrivateMember") private val settingsRepository: SettingsRepository,
+    private val vmRegistry: com.excp.podroid.data.repository.VmRegistry,
 ) : VmEngine {
 
     companion object {
@@ -661,19 +662,19 @@ class AvfEngine @Inject constructor(
      * as the guest writes blocks. Alpine's init formats it ext4 on first
      * boot via the standard initramfs path.
      */
-    private fun ensureStorageImage(storageSizeGb: Int): File {
-        val storageFile = File(context.filesDir, "storage.img")
+    private fun ensureStorageImage(storageSizeGb: Int, storageFile: File): File {
         val desiredBytes = storageSizeGb.toLong() * 1024L * 1024L * 1024L
+        storageFile.parentFile?.mkdirs()
         if (storageFile.exists() && storageFile.length() == desiredBytes) return storageFile
         if (storageFile.exists()) {
-            Log.d(TAG, "storage.img size mismatch — recreating")
+            Log.d(TAG, "${storageFile.name} size mismatch — recreating")
             storageFile.delete()
         }
         try {
             java.io.RandomAccessFile(storageFile, "rw").use { it.setLength(desiredBytes) }
-            Log.d(TAG, "Created storage.img (${storageSizeGb}GB)")
+            Log.d(TAG, "Created ${storageFile.name} (${storageSizeGb}GB)")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create storage.img", e)
+            Log.e(TAG, "Failed to create ${storageFile.name}", e)
         }
         return storageFile
     }
@@ -716,8 +717,10 @@ class AvfEngine @Inject constructor(
         val initrd = File(context.filesDir, "initrd.img").also {
             require(it.exists()) { "initrd missing at ${it.absolutePath}" }
         }
-        val storage = ensureStorageImage(config.storageSizeGb)
-        val squashfs = File(context.filesDir, "alpine-rootfs.squashfs").also {
+        val vm = config.vmRecord
+            ?: throw IllegalStateException("AVF start: no active VM (import or download a rootfs)")
+        val storage = ensureStorageImage(vm.storageSizeGb, vmRegistry.storageFile(vm.id))
+        val squashfs = vmRegistry.rootfsFile(vm.id).also {
             require(it.exists()) { "rootfs missing at ${it.absolutePath}" }
         }
 

@@ -47,6 +47,7 @@ class PodroidService : Service() {
     @Inject lateinit var engine: VmEngine
     @Inject lateinit var portForwardRepository: PortForwardRepository
     @Inject lateinit var settingsRepository: SettingsRepository
+    @Inject lateinit var vmRegistry: com.excp.podroid.data.repository.VmRegistry
     @Inject lateinit var usbPassthroughManager: UsbPassthroughManager
     @Inject lateinit var notificationPoster: com.excp.podroid.engine.hostbridge.AndroidNotificationPoster
     private var hostRequestServer: com.excp.podroid.engine.hostbridge.HostRequestServer? = null
@@ -321,19 +322,27 @@ class PodroidService : Service() {
                         rules.add(com.excp.podroid.data.repository.PortForwardRule(X11Constants.AUDIO_PORT, X11Constants.AUDIO_PORT, "tcp"))
                     }
 
+                    val activeVm = vmRegistry.activeSnapshot()
+                        ?: run {
+                            // No imported VM — surface a state the UI can react
+                            // to (Home screen offers the picker / import flow).
+                            engine.stop()
+                            return@withContext
+                        }
                     val config = VmConfig(
                         ramMb = settingsRepository.getVmRamMbSnapshot(),
                         cpus = settingsRepository.getVmCpusSnapshot(),
                         sshEnabled = sshEnabled,
                         androidIp = NetworkUtils.localIpv4(this@PodroidService),
-                        storageSizeGb = settingsRepository.getStorageSizeGbSnapshot(),
                         storageAccessEnabled = settingsRepository.getStorageAccessEnabledSnapshot(),
                         qemuExtraArgs = settingsRepository.getQemuExtraArgsSnapshot(),
                         kernelExtraCmdline = settingsRepository.getKernelExtraCmdlineSnapshot(),
                         verboseLogging = settingsRepository.getAvfVerboseLoggingSnapshot(),
                         x11Dpi = settingsRepository.getX11DpiSnapshot(),
                         usbPassthroughEnabled = settingsRepository.getUsbPassthroughEnabledSnapshot(),
+                        vmRecord = activeVm,
                     )
+                    vmRegistry.markUsed(activeVm.id)
                     serviceScope.launch { observeStateForHostBridge() }
                     if (config.usbPassthroughEnabled) {
                         serviceScope.launch { observeStateForUsb() }

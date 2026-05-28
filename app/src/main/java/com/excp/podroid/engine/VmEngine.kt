@@ -10,6 +10,7 @@
 package com.excp.podroid.engine
 
 import com.excp.podroid.data.repository.PortForwardRule
+import com.excp.podroid.data.repository.VmRecord
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.flow.StateFlow
@@ -98,11 +99,20 @@ data class VmConfig(
     val cpus: Int = 1,
     val sshEnabled: Boolean = false,
     val androidIp: String = "unknown",
-    val storageSizeGb: Int = 2,
     val storageAccessEnabled: Boolean = false,
     val qemuExtraArgs: String = "",
     val kernelExtraCmdline: String = "",
     val verboseLogging: Boolean = false,
     val x11Dpi: Int = 96,
     val usbPassthroughEnabled: Boolean = false,
+    /**
+     * The VM the user picked to run. Required for start() — when null the
+     * engine refuses to launch (no rootfs / no storage to mount). PodroidService
+     * passes [VmRegistry.activeSnapshot] here; the UI must show a non-empty
+     * VM picker so this never reaches the engine null.
+     *
+     * The engine reads the per-VM storage size, distro, and init system from
+     * this record rather than from SettingsRepository.
+     */
+    val vmRecord: VmRecord? = null,
 )
