@@ -20,7 +20,12 @@ on:
       distros:
         description: "Distros to build (comma-separated). Options: alpine, debian, ubuntu, kali, parrot, fedora, arch, opensuse"
         type: string
-        default: alpine,debian,ubuntu,kali,parrot,fedora,arch,opensuse
+        # Parrot is excluded from the default — its archive signing-key URL
+        # moves around and a fixed URL has been hard to nail down. Add 'parrot'
+        # to this list manually when triggering if you want it; the build will
+        # still succeed via an unsigned bootstrap fallback if every known
+        # keyring URL 404s. Once a stable URL is found, restore it to the default.
+        default: alpine,debian,ubuntu,kali,fedora,arch,opensuse
       release_tag:
         description: "Publish a Release with this tag (leave empty = artifacts only)"
         type: string

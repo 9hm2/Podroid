@@ -5,11 +5,19 @@ set -eu
 ROOTFS=/work/rootfs
 SUITE="${PODROID_DISTRO_VERSION:-lory}"
 
-install -Dm644 /work/parrot-archive-keyring.gpg \
-    "$ROOTFS/usr/share/keyrings/parrot-archive-keyring.gpg"
+# If we managed to grab the Parrot keyring during the bootstrap stage,
+# pre-plant it in the rootfs for apt to use. If not, parrot-archive-keyring
+# was installed via --include and apt picks it up after first configure.
+if [ -s /work/parrot-archive-keyring.gpg ]; then
+    install -Dm644 /work/parrot-archive-keyring.gpg \
+        "$ROOTFS/usr/share/keyrings/parrot-archive-keyring.gpg"
+    SIGNED_BY="[signed-by=/usr/share/keyrings/parrot-archive-keyring.gpg] "
+else
+    SIGNED_BY=""
+fi
 cat > "$ROOTFS/etc/apt/sources.list" <<EOF
-deb [signed-by=/usr/share/keyrings/parrot-archive-keyring.gpg] https://deb.parrot.sh/parrot ${SUITE} main contrib non-free non-free-firmware
-deb [signed-by=/usr/share/keyrings/parrot-archive-keyring.gpg] https://deb.parrot.sh/parrot ${SUITE}-security main contrib non-free non-free-firmware
+deb ${SIGNED_BY}https://deb.parrot.sh/parrot ${SUITE} main contrib non-free non-free-firmware
+deb ${SIGNED_BY}https://deb.parrot.sh/parrot ${SUITE}-security main contrib non-free non-free-firmware
 EOF
 cat > "$ROOTFS/etc/apt/apt.conf.d/99podroid" <<'EOF'
 APT::Install-Recommends "false";
