@@ -47,6 +47,11 @@ COPY --from=shared-builder /work/vsock-agent/podroid-vsock-agent /work/rootfs/us
 COPY --from=shared-builder /work/host-bridge/podroid-hostd       /work/rootfs/usr/local/bin/podroid-hostd
 
 ENV ALPINE_VERSION=${ALPINE_RELEASE}
+# Two COPYs into /work/files: shared scripts (podroid-resize, podroid-login,
+# profile.d) come from _shared/files; per-distro overrides + Alpine-only
+# files (inittab, OpenRC init.d, rc.conf) come from alpine/files. The second
+# COPY wins on filename collisions, so a distro can override anything shared.
+COPY _shared/files    /work/files
 COPY alpine/files     /work/files
 COPY alpine/build.sh  /work/build.sh
 RUN chmod +x /work/build.sh && /work/build.sh
