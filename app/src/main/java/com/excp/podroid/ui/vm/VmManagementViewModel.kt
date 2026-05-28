@@ -137,6 +137,8 @@ class VmManagementViewModel @Inject constructor(
                     }
                 }
 
+                validateSquashfsOrThrow(dest)
+
                 val record = VmRecord(
                     id = id,
                     name = name.ifBlank { defaultNameFor(distro, distroVersion) },
@@ -174,12 +176,12 @@ class VmManagementViewModel @Inject constructor(
             val dest = registry.rootfsFile(id)
             try {
                 dest.parentFile?.mkdirs()
-                val conn = (java.net.URL(entry.downloadUrl).openConnection()
-                        as java.net.HttpURLConnection).apply {
-                    connectTimeout = 15000
-                    readTimeout = 30000
-                    instanceFollowRedirects = true
-                }
+                // GitHub Release browser_download_url 302-redirects to
+                // objects.githubusercontent.com. HttpURLConnection's automatic
+                // follow drops on some Android stacks (e.g. when the Location
+                // is on a different host but same scheme), so handle it
+                // manually with a small bounded loop.
+                val conn = openWithRedirects(entry.downloadUrl)
                 if (conn.responseCode !in 200..299) {
                     throw IllegalStateException("HTTP ${conn.responseCode} from ${entry.downloadUrl}")
                 }
@@ -203,6 +205,7 @@ class VmManagementViewModel @Inject constructor(
                         o.flush()
                     }
                 }
+                validateSquashfsOrThrow(dest)
                 val record = VmRecord(
                     id = id,
                     name = name.ifBlank { defaultNameFor(entry.distro, entry.distroVersion) },
@@ -220,6 +223,68 @@ class VmManagementViewModel @Inject constructor(
                 runCatching { registry.vmDir(id).delete() }
                 _importState.value = ImportState.Failed(e.message ?: "Unknown error")
             }
+        }
+    }
+
+    /** Manually follow up to [maxHops] 3xx redirects. HttpURLConnection's own
+     *  instanceFollowRedirects is unreliable for cross-host same-scheme jumps,
+     *  which is exactly what github.com → objects.githubusercontent.com is. */
+    private fun openWithRedirects(url: String, maxHops: Int = 5): java.net.HttpURLConnection {
+        var current = java.net.URL(url)
+        repeat(maxHops) {
+            val c = (current.openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 30000
+                instanceFollowRedirects = false
+                setRequestProperty("Accept", "application/octet-stream, */*")
+                setRequestProperty("User-Agent", "Podroid/${android.os.Build.VERSION.SDK_INT}")
+            }
+            val code = c.responseCode
+            if (code !in 300..399) return c
+            val loc = c.getHeaderField("Location")
+                ?: throw java.io.IOException("redirect $code from $current without Location")
+            c.disconnect()
+            current = java.net.URL(current, loc)
+        }
+        throw java.io.IOException("too many redirects starting at $url")
+    }
+
+    /**
+     * Squashfs files start with the magic uint32 0x73717368 ("hsqs" in
+     * little-endian ASCII at byte 0). Cheap to check, expensive to skip —
+     * mounting a bogus file inside the guest only surfaces as
+     * "Can't find SQUASHFS superblock on /dev/vdb" after the user has
+     * spent ~30 s booting. Common culprits:
+     *   - ZIP file (the GitHub Actions artifact wraps the .squashfs)
+     *     → 'PK\x03\x04' magic
+     *   - tar.gz (download truncated mid-stream)        → '\x1f\x8b'
+     *   - HTML error page (cross-host redirect failure) → '<!DOCTYPE…'
+     * Any of those fail this check with a head-of-file hex dump so the
+     * user knows immediately what kind of file they actually picked.
+     */
+    private fun validateSquashfsOrThrow(file: File) {
+        if (!file.exists() || file.length() < 4) {
+            throw IllegalStateException(
+                "Imported file is empty (${file.length()} bytes). The download/copy didn't complete.",
+            )
+        }
+        val head = ByteArray(16)
+        file.inputStream().use { it.read(head) }
+        // 0x73717368 LE = 0x68 0x73 0x71 0x73 = "hsqs"
+        val isSquashfs = head[0] == 0x68.toByte() && head[1] == 0x73.toByte() &&
+            head[2] == 0x71.toByte() && head[3] == 0x73.toByte()
+        if (!isSquashfs) {
+            val hex = head.joinToString(" ") { "%02x".format(it.toInt() and 0xff) }
+            val hint = when {
+                head[0] == 0x50.toByte() && head[1] == 0x4B.toByte() ->
+                    "looks like a ZIP. GitHub Actions wraps artifacts in ZIPs — extract first."
+                head[0] == 0x1f.toByte() && head[1] == 0x8b.toByte() ->
+                    "looks like a gzip / tar.gz — extract first."
+                head[0] == 0x3c.toByte() ->
+                    "looks like HTML — the download probably hit an error page (auth / 404 / redirect)."
+                else -> "first bytes: $hex (not a squashfs)."
+            }
+            throw IllegalStateException("Not a valid Podroid rootfs — $hint")
         }
     }
 

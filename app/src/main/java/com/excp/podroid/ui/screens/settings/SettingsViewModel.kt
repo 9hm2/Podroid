@@ -68,6 +68,7 @@ class SettingsViewModel @Inject constructor(
     private val portForwardRepository: PortForwardRepository,
     private val engine: VmEngine,
     private val languageManager: LanguageManager,
+    private val vmRegistry: com.excp.podroid.data.repository.VmRegistry,
 ) : ViewModel() {
 
     val vmRamMb: StateFlow<Int> = settingsRepository.vmRamMb
@@ -370,12 +371,25 @@ class SettingsViewModel @Inject constructor(
             appendLine("=== VM State ===")
             appendLine("State:       ${engine.state.value}")
             appendLine("Boot stage:  ${engine.bootStage.value.ifEmpty { "(none)" }}")
-            val storageFile = File(context.filesDir, "storage.img")
-            appendLine(
-                "Storage img: " + if (storageFile.exists())
-                    "${storageFile.absolutePath} (${storageFile.length() / (1024 * 1024)} MB)"
-                else "(not created)"
-            )
+            val active = vmRegistry.activeSnapshot()
+            if (active == null) {
+                appendLine("Active VM:   (none — import or download a rootfs)")
+            } else {
+                val storageFile = vmRegistry.storageFile(active.id)
+                val rootfsFile  = vmRegistry.rootfsFile(active.id)
+                appendLine("Active VM:   ${active.name} (${active.distro} ${active.distroVersion}, ${active.initSystem})")
+                appendLine("VM ID:       ${active.id}")
+                appendLine(
+                    "Rootfs:      " + if (rootfsFile.exists())
+                        "${rootfsFile.absolutePath} (${rootfsFile.length() / (1024 * 1024)} MB)"
+                    else "(missing — import did not complete)"
+                )
+                appendLine(
+                    "Storage img: " + if (storageFile.exists())
+                        "${storageFile.absolutePath} (${storageFile.length() / (1024 * 1024)} MB)"
+                    else "(not created — will be initialised on first boot)"
+                )
+            }
             appendLine()
 
             appendLine("=== Port Forward Rules (${rules.size}) ===")
