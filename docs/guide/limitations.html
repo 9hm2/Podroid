@@ -92,6 +92,11 @@
             <td>Requesting more than one vCPU under AVF gives the VM all available host cores rather than the exact count chosen in Settings. The CPU count setting has full effect on the QEMU backend only.</td>
           </tr>
           <tr>
+            <td>USB passthrough</td>
+            <td>QEMU backend only</td>
+            <td>Passing a physical USB device into the VM works only on the QEMU backend, which streams the open device handle to the emulator over QMP. The AVF backend has no equivalent channel, so USB passthrough is unavailable there. It is also opt-in and adds a USB controller at boot, so it must be enabled while the VM is stopped.</td>
+          </tr>
+          <tr>
             <td>Storage</td>
             <td>Size cannot be changed after setup without a full reset</td>
             <td>The persistent ext4 overlay image (<code>storage.img</code>) is created at first-boot time and cannot be non-destructively resized later. Choose your storage size in the setup wizard. A future release may add live resize; for now a factory reset is required to change the allocation.</td>
@@ -187,7 +192,7 @@
         <a class="prev" href="settings.html"><span class="dir">Previous</span>&larr; Terminal &amp; settings</a>
         <a class="next" href="use-cases.html"><span class="dir">Next</span>Use cases &rarr;</a>
       </div>
-      <p class="docfoot">Podroid is free software (GPL). Docs for v1.2.1. Found something inaccurate? <a href="https://github.com/ExTV/Podroid/issues">Open an issue</a>.</p>
+      <p class="docfoot">Podroid is free software (GPL). Docs for v1.2.3. Found something inaccurate? <a href="https://github.com/ExTV/Podroid/issues">Open an issue</a>.</p>
     </main>
   </div>
 

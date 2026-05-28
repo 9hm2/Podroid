@@ -11,6 +11,7 @@ package com.excp.podroid.engine
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -140,6 +141,8 @@ class QmpClient(private val socketPath: String) {
                 }
                 result
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "QMP command failed: $command", e)
             Result.failure(e)

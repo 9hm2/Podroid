@@ -14,6 +14,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.excp.podroid.BuildConfig
+import com.excp.podroid.data.repository.LanguageManager
 import com.excp.podroid.data.repository.PortForwardRepository
 import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.data.repository.SettingsRepository
@@ -56,6 +57,8 @@ data class SettingsUiState(
     val darkTheme: Boolean = false,
     val dynamicColorEnabled: Boolean = false,
     val engineSelection: EngineSelection = EngineSelection.AUTO,
+    val language: String = "auto",
+    val systemDefaultLanguage: String = "auto",
 )
 
 @HiltViewModel
@@ -64,6 +67,7 @@ class SettingsViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val portForwardRepository: PortForwardRepository,
     private val engine: VmEngine,
+    private val languageManager: LanguageManager,
 ) : ViewModel() {
 
     val vmRamMb: StateFlow<Int> = settingsRepository.vmRamMb
@@ -104,7 +108,9 @@ class SettingsViewModel @Inject constructor(
             arrayOf(storageAccess, qemu, kernel, dark, dyn)
         },
         settingsRepository.engineSelection,
-    ) { a, b, engineSel ->
+        settingsRepository.language,
+        languageManager.language,
+    ) { a, b, engineSel, lang, sysLang ->
         SettingsUiState(
             vmRamMb = a[0] as Int,
             vmCpus = a[1] as Int,
@@ -116,6 +122,8 @@ class SettingsViewModel @Inject constructor(
             darkTheme = b[3] as Boolean,
             dynamicColorEnabled = b[4] as Boolean,
             engineSelection = engineSel,
+            language = lang,
+            systemDefaultLanguage = sysLang,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsUiState())
 
@@ -185,6 +193,12 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setGpsBridgeEnabled(value) }
     }
 
+    suspend fun setLanguage(value: String) {
+        Log.d(TAG, "setLanguage: $value")
+        languageManager.setLanguage(value)
+        Log.d(TAG, "setLanguage done")
+    }
+
     fun setVmRamMb(value: Int) {
         viewModelScope.launch { settingsRepository.setVmRamMb(value) }
     }
@@ -243,6 +257,13 @@ class SettingsViewModel @Inject constructor(
         "avf" -> com.excp.podroid.engine.avf.AvfDiagnostics.externalStorageShareSupported()
         else  -> true
     }
+
+    /**
+     * USB passthrough rides the QEMU QMP control socket (add-fd + device_add
+     * usb-host); the AVF backend has no QMP channel, so it can never pass a
+     * device through. QEMU-only.
+     */
+    fun isUsbPassthroughAvailable(): Boolean = engine.backendId == "qemu"
 
     private val _exportError = MutableStateFlow<String?>(null)
     /** One-shot export failure message; clear after showing with [clearExportError]. */

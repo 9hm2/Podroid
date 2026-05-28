@@ -97,6 +97,9 @@ class QemuEngine @Inject constructor(
     // GPS NMEA channel: Android Location → hvc4 in the guest, where gpsd
     // reads it as a serial GPS source. Only exposed when gpsBridgeEnabled.
     override val gpsSockPath: String get() = "${context.filesDir.absolutePath}/gps.sock"
+    // Host bridge channel — guest-to-Android RPC (notify, port-forward, etc.)
+    // served by podroid-hostd in the guest.
+    val hostSockPath: String get() = "${context.filesDir.absolutePath}/host.sock"
 
     /**
      * Last QEMU process exit code (null until it exits) + a bounded tail of
@@ -325,6 +328,7 @@ class QemuEngine @Inject constructor(
         File(term2SockPath).delete()
         File(gpsSockPath).delete()
         File(qmpSocketPath).delete()
+        File(hostSockPath).delete()
 
         try {
             val cmd = buildCommand(qemuExe, portForwards, config)
@@ -483,6 +487,9 @@ class QemuEngine @Inject constructor(
             }
         }, "podroid-qemu-stop").apply { isDaemon = true }.start()
     }
+
+    override fun openHostTransport(): com.excp.podroid.engine.hostbridge.HostTransport? =
+        com.excp.podroid.engine.hostbridge.QemuHostTransport.open(hostSockPath)
 
     override suspend fun addPortForward(rule: PortForwardRule) {
         if (_state.value !is VmState.Running) return
@@ -656,6 +663,10 @@ class QemuEngine @Inject constructor(
             args += "-chardev"; args += "socket,id=gps0,path=$gpsSockPath,server=on,wait=off"
             args += "-device";  args += "virtconsole,chardev=gps0,name=org.podroid.gps"
         }
+
+        // hvc2 = host bridge (guest podroid-hostd <-> Android host.sock)
+        args += "-chardev"; args += "socket,id=host0,path=$hostSockPath,server=on,wait=off"
+        args += "-device";  args += "virtconsole,chardev=host0,name=org.podroid.host"
 
         args += "-display"; args += "none"
         args += "-qmp";     args += "unix:$qmpSocketPath,server,nowait"

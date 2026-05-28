@@ -8,7 +8,7 @@
 # SECTION 0: Custom Kernel Build (aarch64) — Image + modules
 # ==============================================================================
 FROM debian:bookworm AS kernel-builder
-ARG KERNEL_VERSION=7.0.5
+ARG KERNEL_VERSION=7.0.10
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget ca-certificates xz-utils make gcc gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
@@ -137,7 +137,12 @@ RUN cd linux-${KERNEL_VERSION} \
                   DECOMPRESS_ZSTD ZSTD_DECOMPRESS \
                   IKCONFIG IKCONFIG_PROC BINFMT_MISC \
                   VSOCKETS VIRTIO_VSOCKETS \
-                  RFKILL LEDS_CLASS CFG80211 MAC80211 RTW88 BT; do \
+                  RFKILL LEDS_CLASS CFG80211 MAC80211 RTW88 BT \
+                  USB USB_SUPPORT WLAN \
+                  RTW88_8821AU RTW88_8812AU RTW88_8814AU \
+                  FW_LOADER_COMPRESS FW_LOADER_COMPRESS_ZSTD UNICODE \
+                  USB_XHCI_HCD USB_XHCI_PCI USB_STORAGE USB_UAS \
+                  SCSI BLK_DEV_SD VFAT_FS EXFAT_FS; do \
            grep -q "^CONFIG_${opt}=y\$" .config \
                || { echo "FATAL: CONFIG_${opt} is not =y after merge" >&2; \
                     grep "CONFIG_${opt}" .config >&2; exit 1; }; \
@@ -304,6 +309,14 @@ RUN printf '#ifndef PODROID_QEMU_JMP_H\n#define PODROID_QEMU_JMP_H\n#include <se
 RUN sed -i '1i#include "/opt/qemu_jmp.h"' ${QEMU_DIR}/util/coroutine-ucontext.c \
     && sed -i 's/\bsigsetjmp(\([^,]*\), *0)/_qemu_setjmp(\1)/g' ${QEMU_DIR}/util/coroutine-ucontext.c \
     && sed -i 's/\bsiglongjmp(/_qemu_longjmp(/g' ${QEMU_DIR}/util/coroutine-ucontext.c
+
+# USB passthrough on Android: an unprivileged app can't scan /sys/bus/usb or open
+# /dev/bus/usb, so libusb's default enumeration in libusb_init() fails with
+# "failed to init libusb" and device_add usb-host never works. We only ever wrap
+# a fd handed over from UsbDeviceConnection (libusb_wrap_sys_device), so set
+# LIBUSB_OPTION_NO_DEVICE_DISCOVERY before libusb_init to skip enumeration.
+RUN sed -i 's@^    rc = libusb_init(&ctx);@#if defined(__ANDROID__)\n    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY); /* unprivileged Android: wrap passed fd only, skip enumeration */\n#endif\n    rc = libusb_init(\&ctx);@' ${QEMU_DIR}/hw/usb/host-libusb.c \
+    && grep -q LIBUSB_OPTION_NO_DEVICE_DISCOVERY ${QEMU_DIR}/hw/usb/host-libusb.c
 
 RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-" --extra-cflags="-fPIC -DANDROID -include /opt/shm_shim.h -I${PREFIX}/include -I${PREFIX}/include/glib-2.0 -I${PREFIX}/lib/glib-2.0/include" --extra-ldflags="-L${PREFIX}/lib -Wl,-z,max-page-size=16384 ${PREFIX}/lib/libucontext.a ${PREFIX}/lib/libshm.a ${PREFIX}/lib/libqemujmp.a" --prefix=/opt/qemu-out --target-list=aarch64-softmmu --enable-tcg --enable-slirp --enable-virtfs --enable-libusb --enable-pie --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-vhost-user --disable-plugins --with-coroutine=ucontext && make -j$(nproc) install
 

@@ -33,11 +33,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.excp.podroid.BuildConfig
+import com.excp.podroid.R
 import com.excp.podroid.engine.VmState
 import com.excp.podroid.ui.components.AdaptiveContainer
 import com.excp.podroid.ui.components.PodroidDestructiveButton
@@ -77,8 +79,8 @@ fun HomeScreen(
         AlertDialog(
             onDismissRequest = { viewModel.dismissUpdate() },
             icon  = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
-            title = { Text("Update available") },
-            text  = { Text("Version ${info.latestVersion} is available. You have ${BuildConfig.VERSION_NAME}.") },
+            title = { Text(stringResource(R.string.update_available)) },
+            text  = { Text(stringResource(R.string.version_available, info.latestVersion, BuildConfig.VERSION_NAME)) },
             confirmButton = {
                 TextButton(onClick = {
                     // Guard against ActivityNotFoundException (no browser) or a
@@ -87,10 +89,10 @@ fun HomeScreen(
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.releaseUrl)))
                     }
                     viewModel.dismissUpdate()
-                }) { Text("Download") }
+                }) { Text(stringResource(R.string.download)) }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.dismissUpdate() }) { Text("Later") }
+                TextButton(onClick = { viewModel.dismissUpdate() }) { Text(stringResource(R.string.later)) }
             },
         )
     }
@@ -98,10 +100,10 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             PodroidTopBar(
-                title = "Podroid",
+                title = stringResource(R.string.app_name),
                 actions = {
                     IconButton(onClick = onNavigateToSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.settings))
                     }
                 },
             )
@@ -199,19 +201,16 @@ private fun AvfHintBanner(onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.SM),
         ) {
             Text(
-                "AVF (KVM) available on this device",
+                stringResource(R.string.avf_available),
                 style = MaterialTheme.typography.titleSmall,
             )
             Text(
-                "Needs a PC with adb, or the Shizuku app for on-device grant. Run once:",
+                stringResource(R.string.avf_hint_needs_pc),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "adb shell pm grant com.excp.podroid \\\n" +
-                    "  android.permission.MANAGE_VIRTUAL_MACHINE\n" +
-                    "adb shell pm grant com.excp.podroid \\\n" +
-                    "  android.permission.USE_CUSTOM_VIRTUAL_MACHINE",
+                text = stringResource(R.string.avf_grant_commands),
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -220,7 +219,7 @@ private fun AvfHintBanner(onDismiss: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 TextButton(onClick = onDismiss) {
-                    Text("Dismiss")
+                    Text(stringResource(R.string.dismiss))
                 }
             }
         }
@@ -236,12 +235,12 @@ private fun HomeStatusBlock(
     meta: HomeMeta,
     uptimeLabel: String?,
 ) {
-    PodroidSectionLabel("VM Status")
+    PodroidSectionLabel(stringResource(R.string.vm_status))
     Text(
         text = when {
-            isStarting -> "Starting"
-            isRunning  -> "Running"
-            else       -> "Stopped"
+            isStarting -> stringResource(R.string.status_starting)
+            isRunning  -> stringResource(R.string.status_running)
+            else       -> stringResource(R.string.status_stopped)
         },
         style = MaterialTheme.typography.displayLarge,
         color = when {
@@ -257,9 +256,9 @@ private fun HomeStatusBlock(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val (dot, label) = when {
-            isRunning  -> PodroidStatusColors.Running  to (uptimeLabel ?: "Up")
-            isStarting -> PodroidStatusColors.Starting to bootStage.ifEmpty { "Starting" }
-            else       -> PodroidStatusColors.Stopped  to "Idle"
+            isRunning  -> PodroidStatusColors.Running  to (uptimeLabel ?: stringResource(R.string.up))
+            isStarting -> PodroidStatusColors.Starting to bootStage.ifEmpty { stringResource(R.string.status_starting) }
+            else       -> PodroidStatusColors.Stopped  to stringResource(R.string.status_idle)
         }
         PodroidStatus(label = label, dotColor = dot)
         Text(
@@ -270,7 +269,7 @@ private fun HomeStatusBlock(
     }
     if (vmState is VmState.Error) {
         Spacer(Modifier.height(PodroidTokens.Spacing.MD))
-        PodroidSectionLabel("Error")
+        PodroidSectionLabel(stringResource(R.string.error_title))
         Text(
             text = vmState.message,
             style = MaterialTheme.typography.bodyMedium,
@@ -293,27 +292,28 @@ private fun HomeDataSection(
     if (showStarting || showError) return
     Spacer(Modifier.height(PodroidTokens.Spacing.MD))
     if (isRunning) {
-        PodroidSectionLabel("Network")
-        PodroidListRow(label = "Phone IP", value = phoneIp, mono = true)
+        PodroidSectionLabel(stringResource(R.string.network))
+        PodroidListRow(label = stringResource(R.string.phone_ip), value = phoneIp, mono = true)
         PodroidListRow(
-            label = "SSH",
-            value = if (meta.sshEnabled) ":9922 · podroid" else "Off",
+            label = stringResource(R.string.ssh),
+            value = if (meta.sshEnabled) ":9922 · podroid" else stringResource(R.string.off),
             mono = meta.sshEnabled,
         )
         PodroidListRow(
-            label = "Port forwards",
-            value = if (meta.portForwardCount == 0) "None" else "${meta.portForwardCount} active",
+            label = stringResource(R.string.port_forwards),
+            value = if (meta.portForwardCount == 0) stringResource(R.string.none)
+                    else "${meta.portForwardCount} ${stringResource(R.string.active)}",
         )
     } else {
-        PodroidSectionLabel("Last session")
+        PodroidSectionLabel(stringResource(R.string.last_session))
         if (meta.lastBootDurationMs > 0L) {
             PodroidListRow(
-                label = "Booted in",
+                label = stringResource(R.string.booted_in),
                 value = formatBootDuration(meta.lastBootDurationMs),
             )
         }
         PodroidListRow(
-            label = "Build",
+            label = stringResource(R.string.build),
             value = "v${BuildConfig.VERSION_NAME} · QEMU ${BuildConfig.QEMU_VERSION}",
             mono = true,
         )
@@ -343,17 +343,17 @@ private fun HomeActionButtons(
     onOpenTerminal: () -> Unit,
 ) {
     if (isRunning) {
-        PodroidPrimaryButton(text = "Open Terminal", onClick = onOpenTerminal)
+        PodroidPrimaryButton(text = stringResource(R.string.open_terminal), onClick = onOpenTerminal)
         Spacer(Modifier.height(PodroidTokens.Spacing.SM))
         Row(horizontalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.SM)) {
-            PodroidGhostButton(text = "Restart", onClick = onRestart, modifier = Modifier.weight(1f))
-            PodroidDestructiveButton(text = "Stop", onClick = onStop, modifier = Modifier.weight(1f))
+            PodroidGhostButton(text = stringResource(R.string.restart), onClick = onRestart, modifier = Modifier.weight(1f))
+            PodroidDestructiveButton(text = stringResource(R.string.stop), onClick = onStop, modifier = Modifier.weight(1f))
         }
     } else if (isStarting) {
-        PodroidDestructiveButton(text = "Stop", onClick = onStop)
+        PodroidDestructiveButton(text = stringResource(R.string.stop), onClick = onStop)
     } else if (vmState is VmState.Error) {
-        PodroidPrimaryButton(text = "Try again", onClick = onStart)
+        PodroidPrimaryButton(text = stringResource(R.string.try_again), onClick = onStart)
     } else {
-        PodroidPrimaryButton(text = "Start VM", onClick = onStart)
+        PodroidPrimaryButton(text = stringResource(R.string.start_vm), onClick = onStart)
     }
 }

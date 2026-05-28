@@ -53,10 +53,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.excp.podroid.R
 import com.excp.podroid.ui.components.AdaptiveContainer
 import com.excp.podroid.ui.components.PodroidGhostButton
 import com.excp.podroid.ui.components.PodroidListRow
@@ -82,8 +84,10 @@ fun SetupScreen(
     var selectedGb by rememberSaveable { mutableIntStateOf(DEFAULT_STORAGE_GB) }
     var sshEnabled by rememberSaveable { mutableStateOf(true) }
     var storageAccessEnabled by rememberSaveable { mutableStateOf(false) }
+    var usbPassthroughEnabled by rememberSaveable { mutableStateOf(false) }
+    val usbPassthroughAvailable = remember { viewModel.usbPassthroughAvailable() }
     val setupComplete by viewModel.setupComplete.collectAsStateWithLifecycle()
-    val pagerState = rememberPagerState(pageCount = { 3 })
+    val pagerState = rememberPagerState(pageCount = { 4 })
     val scope = rememberCoroutineScope()
 
     // Request the notification permission BEFORE navigating away; using
@@ -131,7 +135,7 @@ fun SetupScreen(
         ) {
             // Step progress bar
             LinearProgressIndicator(
-                progress = { (pagerState.currentPage + 1) / 3f },
+                progress = { (pagerState.currentPage + 1) / 4f },
                 modifier = Modifier.fillMaxWidth(),
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
@@ -184,11 +188,20 @@ fun SetupScreen(
                             }
                         },
                         onBack = { scope.launch { pagerState.animateScrollToPage(1) } },
+                        onNext = { scope.launch { pagerState.animateScrollToPage(3) } },
+                    )
+                    3 -> UsbPassthroughPage(
+                        windowSizeClass = windowSizeClass,
+                        usbPassthroughEnabled = usbPassthroughEnabled,
+                        available = usbPassthroughAvailable,
+                        onUsbPassthroughToggle = { usbPassthroughEnabled = it },
+                        onBack = { scope.launch { pagerState.animateScrollToPage(2) } },
                         onGetStarted = {
                             viewModel.completeSetup(
                                 storageSizeGb = selectedGb,
                                 sshEnabled = sshEnabled,
                                 storageAccessEnabled = storageAccessEnabled,
+                                usbPassthroughEnabled = usbPassthroughEnabled && usbPassthroughAvailable,
                             )
                         },
                     )
@@ -203,7 +216,7 @@ fun SetupScreen(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                repeat(3) { index ->
+                repeat(4) { index ->
                     val isSelected = pagerState.currentPage == index
                     val dotWidth by animateDpAsState(
                         targetValue = if (isSelected) 24.dp else 8.dp,
@@ -324,9 +337,9 @@ private fun StoragePage(
 ) {
     SetupPageLayout(
         windowSizeClass = windowSizeClass,
-        stepLabel  = "Step 1 of 3",
-        title      = "Persistent Storage",
-        description = "Storage for installed packages, container images, and your files. Cannot be resized later without resetting the VM.",
+        stepLabel  = stringResource(R.string.step_1_of_4),
+        title      = stringResource(R.string.persistent_storage),
+        description = stringResource(R.string.storage_description),
         bottomBar  = { SetupNextBar(onNext = onNext) },
     ) {
         Text(
@@ -351,25 +364,25 @@ private fun VmConfigPage(
 ) {
     SetupPageLayout(
         windowSizeClass = windowSizeClass,
-        stepLabel  = "Step 2 of 3",
-        title      = "Configure your VM",
-        description = "Defaults tuned for performance and battery. Change anytime in Settings.",
-        bottomBar  = { SetupNavBar(onBack = onBack, onNext = onNext, nextLabel = "Continue") },
+        stepLabel  = stringResource(R.string.step_2_of_4),
+        title      = stringResource(R.string.configure_vm),
+        description = stringResource(R.string.vm_config_description),
+        bottomBar  = { SetupNavBar(onBack = onBack, onNext = onNext, nextLabel = stringResource(R.string.continue_label)) },
     ) {
-        PodroidSectionLabel("Resources")
-        PodroidListRow(label = "CPU cores", value = "2")
-        PodroidListRow(label = "RAM",       value = "512 MB")
+        PodroidSectionLabel(stringResource(R.string.resources))
+        PodroidListRow(label = stringResource(R.string.cpu_cores), value = "2")
+        PodroidListRow(label = stringResource(R.string.ram_label),       value = "512 MB")
 
-        PodroidSectionLabel("Network")
+        PodroidSectionLabel(stringResource(R.string.network_label))
         PodroidListRow(
-            label = "SSH access",
+            label = stringResource(R.string.ssh_access),
             rightSlot = { PodroidSwitch(checked = sshEnabled, onCheckedChange = onSshToggle) },
             divider = false,
         )
         if (sshEnabled) {
             Spacer(Modifier.height(PodroidTokens.Spacing.XS))
             Text(
-                text = "ssh root@<phone-ip> -p 9922   (password: podroid)",
+                text = stringResource(R.string.ssh_password_hint),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = PodroidTokens.mono(),
@@ -387,40 +400,82 @@ private fun StorageAccessPage(
     onStorageAccessToggle: (Boolean) -> Unit,
     onOpenStorageAccessSettings: () -> Unit,
     onBack: () -> Unit,
-    onGetStarted: () -> Unit,
+    onNext: () -> Unit,
 ) {
     val canManageAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     val hasStoragePermission = !canManageAllFiles || Environment.isExternalStorageManager()
 
     SetupPageLayout(
         windowSizeClass = windowSizeClass,
-        stepLabel  = "Step 3 of 3",
-        title      = "Downloads Sharing",
-        description = "Optional. Mount your Android Downloads folder into the VM over virtio-9p.",
-        bottomBar  = { SetupNavBar(onBack = onBack, onNext = onGetStarted, nextLabel = "Get Started") },
+        stepLabel  = stringResource(R.string.step_3_of_4),
+        title      = stringResource(R.string.downloads_sharing),
+        description = stringResource(R.string.storage_access_description),
+        bottomBar  = { SetupNavBar(onBack = onBack, onNext = onNext, nextLabel = stringResource(R.string.continue_label)) },
     ) {
-        PodroidSectionLabel("Sharing")
+        PodroidSectionLabel(stringResource(R.string.sharing))
         PodroidListRow(
-            label = "Enable Downloads sharing",
+            label = stringResource(R.string.enable_downloads_sharing),
             rightSlot = { PodroidSwitch(checked = storageAccessEnabled, onCheckedChange = onStorageAccessToggle) },
         )
         if (!canManageAllFiles) {
             Spacer(Modifier.height(PodroidTokens.Spacing.SM))
             Text(
-                text = "Requires Android 11+. On this device the toggle is for future-OS upgrades only.",
+                text = stringResource(R.string.requires_android_11),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (storageAccessEnabled && canManageAllFiles && !hasStoragePermission) {
             Spacer(Modifier.height(PodroidTokens.Spacing.LG))
-            PodroidPrimaryButton(text = "Grant storage access", onClick = onOpenStorageAccessSettings)
+            PodroidPrimaryButton(text = stringResource(R.string.grant_storage_access), onClick = onOpenStorageAccessSettings)
         }
         Spacer(Modifier.height(PodroidTokens.Spacing.LG))
         Text(
-            text = "Warning: on some devices this can crash the VM. Disable it if start fails.",
+            text = stringResource(R.string.storage_access_warning),
             style = MaterialTheme.typography.bodyMedium,
             color = PodroidTokens.Amber,
+        )
+    }
+}
+
+// ── Page 4: USB passthrough ───────────────────────────────────────────────────
+
+@Composable
+private fun UsbPassthroughPage(
+    windowSizeClass: WindowSizeClass,
+    usbPassthroughEnabled: Boolean,
+    available: Boolean,
+    onUsbPassthroughToggle: (Boolean) -> Unit,
+    onBack: () -> Unit,
+    onGetStarted: () -> Unit,
+) {
+    SetupPageLayout(
+        windowSizeClass = windowSizeClass,
+        stepLabel  = stringResource(R.string.step_4_of_4),
+        title      = stringResource(R.string.usb_passthrough),
+        description = stringResource(R.string.usb_passthrough_description),
+        bottomBar  = { SetupNavBar(onBack = onBack, onNext = onGetStarted, nextLabel = stringResource(R.string.get_started)) },
+    ) {
+        PodroidSectionLabel(stringResource(R.string.usb_devices_section))
+        PodroidListRow(
+            label = stringResource(R.string.enable_usb_passthrough),
+            rightSlot = {
+                PodroidSwitch(
+                    checked = usbPassthroughEnabled && available,
+                    onCheckedChange = onUsbPassthroughToggle,
+                    enabled = available,
+                )
+            },
+        )
+        Spacer(Modifier.height(PodroidTokens.Spacing.SM))
+        Text(
+            text = if (available) {
+                stringResource(R.string.usb_passthrough_available)
+            } else {
+                stringResource(R.string.usb_passthrough_unavailable)
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -430,7 +485,7 @@ private fun StorageAccessPage(
 @Composable
 private fun SetupNextBar(onNext: () -> Unit) {
     Column(modifier = Modifier.padding(vertical = PodroidTokens.Spacing.LG)) {
-        PodroidPrimaryButton(text = "Continue", onClick = onNext)
+        PodroidPrimaryButton(text = stringResource(R.string.continue_label), onClick = onNext)
     }
 }
 
@@ -446,7 +501,7 @@ private fun SetupNavBar(
             .padding(vertical = PodroidTokens.Spacing.LG),
         horizontalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.SM),
     ) {
-        PodroidGhostButton(text = "Back", onClick = onBack, modifier = Modifier.weight(1f))
+        PodroidGhostButton(text = stringResource(R.string.back), onClick = onBack, modifier = Modifier.weight(1f))
         PodroidPrimaryButton(text = nextLabel, onClick = onNext, modifier = Modifier.weight(2f))
     }
 }

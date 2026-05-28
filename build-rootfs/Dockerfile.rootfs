@@ -19,6 +19,8 @@ RUN apk add --no-cache musl-dev gcc make linux-headers
 WORKDIR /work
 COPY vsock-agent /work/vsock-agent
 RUN cd /work/vsock-agent && make CC=gcc
+COPY host-bridge /work/host-bridge
+RUN cd /work/host-bridge && make CC=gcc
 
 # ── Stage 2: debootstrap the Kali rootfs ────────────────────────────────────
 FROM debian:bookworm AS builder
@@ -75,6 +77,7 @@ RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
 
 # vsock-agent (AVF control channel) built in stage 1.
 COPY --from=vsock-builder /work/vsock-agent/podroid-vsock-agent /work/rootfs/usr/local/bin/podroid-vsock-agent
+COPY --from=vsock-builder /work/host-bridge/podroid-hostd /work/rootfs/usr/local/bin/podroid-hostd
 
 COPY files /work/files
 COPY build-rootfs.sh /work/build-rootfs.sh
