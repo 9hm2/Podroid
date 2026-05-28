@@ -1,12 +1,13 @@
 name: Build app
 
-# Manually-triggered build of the full Podroid app. Cross-compiles the kernel,
-# Kali rootfs and QEMU in parallel jobs, then assembles the APK in a final
-# job that downloads each artifact.
+# Manually-triggered build of the Podroid APK. Cross-compiles the kernel +
+# initramfs and QEMU in parallel jobs, then assembles the APK. No rootfs job
+# here on multi-vm — rootfs squashfs files are NOT bundled in the APK
+# anymore; they're produced by .github/workflows/build-rootfs.yml and the
+# user picks one via the in-app Download/Import flow.
 #
 # Wall-clock budget on ubuntu-latest:
 #   - kernel+initramfs : ~15 min  (Docker layer-cached)
-#   - rootfs (Kali)    : ~5 min   (debootstrap cached)
 #   - qemu             : ~25 min  first run, ~3 min cached
 #   - apk              : ~5 min
 # Parallel = ~25 min wall-clock first run, ~10 min cached.
@@ -15,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch to build (leave empty = use the branch picked in the Use workflow from dropdown)"
+        description: "Branch to build (defaults to multi-vm; override to build any other branch)"
         type: string
-        default: ""
+        default: multi-vm
       build_type:
         description: APK build type
         type: choice
@@ -65,30 +66,6 @@ jobs:
             app/src/main/assets/initrd.img
           if-no-files-found: error
 
-  rootfs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with: { ref: "${{ inputs.branch != '' && inputs.branch || github.ref_name }}" }
-      - run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build Kali rootfs
-        run: ./build-all.sh rootfs
-      - uses: actions/upload-artifact@v4
-        with:
-          name: assets-rootfs
-          path: app/src/main/assets/alpine-rootfs.squashfs
-          if-no-files-found: error
-
   qemu:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -125,7 +102,7 @@ jobs:
   # ── Final APK assembly job ────────────────────────────────────────────────
 
   apk:
-    needs: [initramfs, rootfs, qemu]
+    needs: [initramfs, qemu]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -143,11 +120,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: assets-initramfs
-          path: app/src/main/assets
-      - name: Download Kali rootfs asset
-        uses: actions/download-artifact@v4
-        with:
-          name: assets-rootfs
           path: app/src/main/assets
       - name: Download QEMU jniLibs
         uses: actions/download-artifact@v4
