@@ -68,11 +68,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.TextUnit
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -85,6 +82,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.abs
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -301,25 +300,50 @@ fun TerminalScreen(
                         }
                     }
                 }
-                // Swipe to switch tabs. A horizontal drag past the threshold
-                // (~80 dp) cycles forward / backward through the tab list.
-                // Terminal interactions (tap, long-press, vertical scroll) are
-                // unaffected; horizontal drags inside the terminal grid are
-                // rare enough that consuming them for tab navigation is a fair
-                // trade. Disabled when only one channel exists.
+                // Swipe to switch tabs — directional-lock pointerInput so the
+                // embedded TerminalView's native vertical scroll isn't starved.
+                // We observe motion without consuming anything until the
+                // gesture has clearly committed horizontally (|dx| past slop
+                // AND |dx| > 2·|dy|). If vertical wins first we bail out
+                // entirely, leaving the rest of the gesture for TerminalView.
+                // Previously a plain Modifier.draggable(Horizontal) installed
+                // its own slop watcher on the same Box; that competition broke
+                // upward/downward terminal scrolling.
                 val swipeThresholdPx = with(LocalDensity.current) { 80.dp.toPx() }
-                var dragAcc by remember { mutableStateOf(0f) }
-                val dragState = rememberDraggableState { delta -> dragAcc += delta }
+                val gestureSlopPx    = with(LocalDensity.current) { 16.dp.toPx() }
                 val swipeMod = if (viewModel.terminalChannelCount > 1) {
-                    Modifier.draggable(
-                        state = dragState,
-                        orientation = Orientation.Horizontal,
-                        onDragStopped = {
-                            if (dragAcc >  swipeThresholdPx) viewModel.selectTab(viewModel.currentTab - 1)
-                            else if (dragAcc < -swipeThresholdPx) viewModel.selectTab(viewModel.currentTab + 1)
-                            dragAcc = 0f
-                        },
-                    )
+                    Modifier.pointerInput(viewModel.terminalChannelCount) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var dx = 0f
+                            var dy = 0f
+                            var locked = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                // Multi-touch (pinch-zoom etc.) — let the
+                                // child handle it.
+                                if (event.changes.size > 1) return@awaitEachGesture
+                                val change = event.changes.first()
+                                val d = change.positionChange()
+                                dx += d.x
+                                dy += d.y
+                                if (!locked) {
+                                    if (abs(dy) > gestureSlopPx && abs(dy) >= abs(dx)) {
+                                        return@awaitEachGesture
+                                    }
+                                    if (abs(dx) > gestureSlopPx && abs(dx) > abs(dy) * 2) {
+                                        locked = true
+                                    }
+                                }
+                                if (locked) change.consume()
+                                if (!change.pressed) break
+                            }
+                            if (locked) {
+                                if (dx >  swipeThresholdPx) viewModel.selectTab(viewModel.currentTab - 1)
+                                else if (dx < -swipeThresholdPx) viewModel.selectTab(viewModel.currentTab + 1)
+                            }
+                        }
+                    }
                 } else Modifier
                 // Hoisted into its own composable so toggling chrome state in the
                 // parent (showQuickSettings, showExtraKeys, hapticsEnabled, modifier
