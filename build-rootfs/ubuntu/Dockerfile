@@ -59,7 +59,7 @@ RUN set -e; \
         if debootstrap --arch=arm64 --foreign --variant=minbase \
                 --keyring=/work/ubuntu-archive-keyring.gpg \
                 --components=main,universe,multiverse,restricted \
-                --include=systemd-sysv,udev,dbus,libpam-systemd,ubuntu-keyring,ca-certificates,openssh-server,sudo,iproute2,iputils-ping,net-tools,isc-dhcp-client,iw,wireless-tools,rfkill,wpasupplicant,usbutils,pciutils,kmod,bash-completion,less,nano,tmux,screen,tigervnc-standalone-server,tigervnc-common,pulseaudio,pulseaudio-utils \
+                --include=systemd-sysv,udev,dbus,libpam-systemd,ubuntu-keyring,ca-certificates,openssh-server,sudo,iproute2,iputils-ping,net-tools,isc-dhcp-client,iw,wireless-tools,rfkill,wpasupplicant,usbutils,pciutils,kmod,bash-completion,less,nano,tmux,screen \
                 ${UBUNTU_SUITE} /work/rootfs ${UBUNTU_MIRROR}; then \
             echo "=== debootstrap succeeded on attempt $attempt ==="; \
             break; \
@@ -70,16 +70,38 @@ RUN set -e; \
     done
 
 # Second-stage with the standard chroot-friendliness fixes — Ubuntu noble's
-# package postinsts are stricter than Debian's and bail when invoke-rc.d
-# tries to start systemctl-managed services inside an unprivileged chroot.
-#   - policy-rc.d returns 101 → invoke-rc.d treats every service start as
-#     denied without erroring (the chroot has no PID 1 to talk to).
-#   - DEBIAN_FRONTEND=noninteractive + LC_ALL=C → debconf uses its
-#     non-interactive frontend and locale doesn't matter.
+# package postinsts are stricter than Debian's. tigervnc + pulseaudio are
+# deliberately NOT in --include because their config chain runs scripts
+# that need a live dbus + systemd; install them later with an apt step that
+# can fail gracefully. On any failure we dump /debootstrap/debootstrap.log
+# so the actual failing postinst is visible (the 'dconf-service' hint
+# debootstrap prints itself is just a heuristic, usually wrong).
 RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
  && echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
  && chmod +x /work/rootfs/usr/sbin/policy-rc.d \
- && chroot /work/rootfs sh -c 'export DEBIAN_FRONTEND=noninteractive LC_ALL=C; /debootstrap/debootstrap --second-stage' \
+ && { chroot /work/rootfs sh -c 'export DEBIAN_FRONTEND=noninteractive LC_ALL=C; /debootstrap/debootstrap --second-stage'; \
+      rc=$?; \
+      if [ $rc -ne 0 ]; then \
+          echo "=================== debootstrap.log ==================="; \
+          tail -n 200 /work/rootfs/debootstrap/debootstrap.log 2>/dev/null || true; \
+          echo "======================================================="; \
+          exit $rc; \
+      fi; } \
+ && rm -f /work/rootfs/usr/sbin/policy-rc.d
+
+# Install the X11 viewer + audio stack as a separate apt step after second-
+# stage. Doing it here (instead of in --include) means the chroot already
+# has a working dpkg+apt environment, policy-rc.d masks service starts,
+# and a single package's postinst failure doesn't bring down the whole
+# debootstrap retry loop.
+RUN echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
+ && chmod +x /work/rootfs/usr/sbin/policy-rc.d \
+ && chroot /work/rootfs sh -c 'export DEBIAN_FRONTEND=noninteractive LC_ALL=C; \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            tigervnc-standalone-server tigervnc-common \
+            pulseaudio pulseaudio-utils || \
+        echo "WARNING: optional X11/audio stack failed — will be apt-install-able at runtime"' \
  && rm -f /work/rootfs/usr/sbin/policy-rc.d
 
 COPY --from=shared-builder /work/vsock-agent/podroid-vsock-agent /work/rootfs/usr/local/bin/podroid-vsock-agent
