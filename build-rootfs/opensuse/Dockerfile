@@ -25,13 +25,14 @@ RUN zypper --non-interactive install \
 
 WORKDIR /work
 
-# zypper --root reads/writes /work/rootfs/etc/zypp/. Pin the target arch
-# to aarch64 BEFORE addrepo/install so the package resolver matches the
-# aarch64 repo we add below. Otherwise zypper falls back to the host arch
-# (x86_64 on the GitHub runner) and reports "No provider of 'systemd'"
-# for every Tumbleweed aarch64 package.
+# Pin target arch to aarch64 in BOTH the rootfs's zypp.conf AND the host
+# image's — zypper reads the host config to decide what arch to ask the
+# resolver for, even when --root points elsewhere. The previous attempt
+# wrote `arch = aarch64` without the [main] section header so the value
+# was silently ignored, and zypper kept filtering on x86_64.
 RUN mkdir -p /work/rootfs/etc/zypp \
- && printf 'arch = aarch64\n' > /work/rootfs/etc/zypp/zypp.conf \
+ && printf '[main]\narch = aarch64\n' > /work/rootfs/etc/zypp/zypp.conf \
+ && printf '[main]\narch = aarch64\n' >> /etc/zypp/zypp.conf \
  && rpm --root /work/rootfs --initdb --target=aarch64-suse-linux
 
 # zypper --installroot supports cross-arch installation; the aarch64

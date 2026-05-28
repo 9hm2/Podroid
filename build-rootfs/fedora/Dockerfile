@@ -29,21 +29,23 @@ WORKDIR /work
 # carry the host's /etc/yum.repos.d/ across to --installroot, and the
 # default config has no enabled repos pointing at aarch64 mirrors. Write
 # minimal fedora + updates repos pointed at the Everything tree so dnf
-# can resolve the package set below.
+# can resolve the package set below. (printf rather than a heredoc — the
+# previous `<<EOF && \` form broke the Dockerfile parser because the
+# `dnf` invocation after EOF was treated as a new instruction.)
 RUN mkdir -p /work/rootfs/etc/yum.repos.d && \
-    cat > /work/rootfs/etc/yum.repos.d/fedora.repo <<EOF && \
-[fedora]
-name=Fedora ${FEDORA_RELEASE} - aarch64
-baseurl=https://download.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_RELEASE}/Everything/aarch64/os/
-enabled=1
-gpgcheck=0
-
-[fedora-updates]
-name=Fedora ${FEDORA_RELEASE} - aarch64 - Updates
-baseurl=https://download.fedoraproject.org/pub/fedora/linux/updates/${FEDORA_RELEASE}/Everything/aarch64/
-enabled=1
-gpgcheck=0
-EOF
+    printf '%s\n' \
+        '[fedora]' \
+        "name=Fedora ${FEDORA_RELEASE} - aarch64" \
+        "baseurl=https://download.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_RELEASE}/Everything/aarch64/os/" \
+        'enabled=1' \
+        'gpgcheck=0' \
+        '' \
+        '[fedora-updates]' \
+        "name=Fedora ${FEDORA_RELEASE} - aarch64 - Updates" \
+        "baseurl=https://download.fedoraproject.org/pub/fedora/linux/updates/${FEDORA_RELEASE}/Everything/aarch64/" \
+        'enabled=1' \
+        'gpgcheck=0' \
+        > /work/rootfs/etc/yum.repos.d/fedora.repo && \
     dnf --installroot=/work/rootfs \
         --releasever=${FEDORA_RELEASE} \
         --forcearch=aarch64 \

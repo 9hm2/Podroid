@@ -42,6 +42,7 @@ RUN wget --tries=5 --retry-connrefused --waitretry=10 -q \
 # tarball ships a keyring but we install a couple of extra packages
 # (TigerVNC, PulseAudio) the base set doesn't include.
 RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
+ && rm -f /work/rootfs/etc/resolv.conf \
  && cp /etc/resolv.conf /work/rootfs/etc/resolv.conf
 
 RUN echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
