@@ -44,16 +44,15 @@ RUN wget --tries=5 --retry-connrefused --waitretry=10 -q \
 RUN cp /usr/bin/qemu-aarch64-static /work/rootfs/usr/bin/ \
  && rm -f /work/rootfs/etc/resolv.conf \
  && cp /etc/resolv.conf /work/rootfs/etc/resolv.conf \
- # pacman's transaction commit reads /etc/mtab to figure out mount points.
- # Inside the chroot /proc isn't mounted (unprivileged docker build can't
- # mount it), and the ALARM tarball ships /etc/mtab as a symlink to a
- # nonexistent path. The previous attempt with `ln -sf /proc/self/mounts`
- # still dangled in the chroot. A plain empty regular file is the simplest
- # fix that lets pacman's getmntent_r return EOF immediately ("no mounts
- # known") — libalpm proceeds with an empty mount list, which is what we
- # actually want during the install.
+ # pacman's transaction commit calls getmntent_r over /etc/mtab and bails
+ # with "could not determine filesystem mount points" if no entries come
+ # back. An empty file (previous attempt) gave EOF on the first call →
+ # zero entries → same bail. Plant a snapshot of the host's
+ # /proc/self/mounts; libalpm just needs a non-empty mtab to satisfy
+ # its existence check, and the entries themselves don't have to
+ # correspond to actual filesystems visible inside the chroot.
  && rm -f /work/rootfs/etc/mtab \
- && : > /work/rootfs/etc/mtab
+ && cp /proc/self/mounts /work/rootfs/etc/mtab
 
 RUN echo 'exit 101' > /work/rootfs/usr/sbin/policy-rc.d \
  && chmod +x /work/rootfs/usr/sbin/policy-rc.d \
