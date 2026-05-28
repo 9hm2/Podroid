@@ -2,9 +2,14 @@
 ::sysinit:/sbin/openrc boot
 ::wait:/sbin/openrc default
 
-# Two gettys are declared, but only one starts per boot — see /usr/local/bin/podroid-getty:
-# the wrapper reads `podroid.tty=` from the kernel cmdline and sleeps the wrong tty
-# instead of running getty there. This keeps the squashfs backend-agnostic.
+# Gettys for every tty Podroid might use. podroid-getty selects which to run:
+# - hvc0/ttyS0: gated by the `podroid.tty=` kernel cmdline marker, so the
+#   inactive backend's tty parks itself; keeps the squashfs backend-agnostic.
+# - hvc2/hvc3: extra multi-tab terminals exposed by the QEMU backend's
+#   virtio-console bus. The wrapper parks them when the device node is missing
+#   (AVF backend doesn't wire these), so they're harmless there.
 hvc0::respawn:/usr/local/bin/podroid-getty hvc0
 ttyS0::respawn:/usr/local/bin/podroid-getty ttyS0
+hvc2::respawn:/usr/local/bin/podroid-getty hvc2
+hvc3::respawn:/usr/local/bin/podroid-getty hvc3
 ::shutdown:/sbin/openrc shutdown

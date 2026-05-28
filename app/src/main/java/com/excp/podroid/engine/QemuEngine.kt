@@ -315,6 +315,8 @@ class QemuEngine @Inject constructor(
         File(serialSockPath).delete()
         File(terminalSockPath).delete()
         File(ctrlSockPath).delete()
+        File(term1SockPath).delete()
+        File(term2SockPath).delete()
         File(qmpSocketPath).delete()
         File(hostSockPath).delete()
 
@@ -517,6 +519,8 @@ class QemuEngine @Inject constructor(
         File(serialSockPath).delete()
         File(terminalSockPath).delete()
         File(ctrlSockPath).delete()
+        File(term1SockPath).delete()
+        File(term2SockPath).delete()
         _bootStage.value = ""
     }
 
@@ -631,13 +635,21 @@ class QemuEngine @Inject constructor(
         // ── virtio-console bus ────────────────────────────────────────────────
         // hvc0 = primary terminal (getty runs here; bridge connects to terminal.sock)
         // hvc1 = control channel (init daemon reads RESIZE messages from ctrl.sock)
+        // hvc2 = secondary terminal (getty; app tab 2 connects to term1.sock)
+        // hvc3 = tertiary terminal  (getty; app tab 3 connects to term2.sock)
         args += "-device";  args += "virtio-serial-pci"
         args += "-chardev"; args += "socket,id=term0,path=$terminalSockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=term0,name=org.podroid.term"
         args += "-chardev"; args += "socket,id=ctrl0,path=$ctrlSockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=ctrl0,name=org.podroid.ctrl"
+        args += "-chardev"; args += "socket,id=term1,path=$term1SockPath,server=on,wait=off"
+        args += "-device";  args += "virtconsole,chardev=term1,name=org.podroid.term1"
+        args += "-chardev"; args += "socket,id=term2,path=$term2SockPath,server=on,wait=off"
+        args += "-device";  args += "virtconsole,chardev=term2,name=org.podroid.term2"
 
-        // hvc2 = host bridge (guest podroid-hostd <-> Android host.sock)
+        // Host bridge (guest podroid-hostd <-> Android host.sock). Added last on
+        // the virtio-serial bus so it lands on hvc4 — the multi-tab terminals
+        // need hvc2/hvc3 (their gettys are wired to those names in the rootfs).
         args += "-chardev"; args += "socket,id=host0,path=$hostSockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=host0,name=org.podroid.host"
 

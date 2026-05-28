@@ -15,11 +15,19 @@ TTY="$1"
 WANT=$(sed -n 's/.*podroid\.tty=\([a-zA-Z0-9]*\).*/\1/p' /proc/cmdline)
 [ -z "$WANT" ] && WANT=hvc0
 
-if [ "$TTY" = "$WANT" ]; then
-    exec /sbin/getty -L -l /usr/local/bin/podroid-login 115200 "$TTY" xterm-256color
-fi
+# Decision:
+# - The primary tty pair (hvc0/ttyS0) is gated by the cmdline marker so only
+#   the active backend's tty starts.
+# - The multi-tab extras (hvc2/hvc3) start whenever their device node exists,
+#   i.e. on QEMU's multi-virtconsole setup; on AVF the node is absent and we
+#   park instead of letting busybox init throttle the respawn.
+case "$TTY" in
+    hvc0|ttyS0)
+        [ "$TTY" = "$WANT" ] || exec sleep 2147483647
+        ;;
+    *)
+        [ -c "/dev/$TTY" ] || exec sleep 2147483647
+        ;;
+esac
 
-# Wrong tty for this backend. Sleep instead of exiting so busybox init
-# doesn't throttle us with "respawning too fast" — the inittab line will
-# just stay parked until shutdown.
-exec sleep 2147483647
+exec /sbin/getty -L -l /usr/local/bin/podroid-login 115200 "$TTY" xterm-256color
