@@ -60,8 +60,14 @@ class QemuEngine @Inject constructor(
     private val _bootStage = MutableStateFlow("")
 
     private var _terminalSession: TerminalSession? = null
+    // Tabs 2 and 3 — lazy bridge instances pointed at term1.sock / term2.sock
+    // (the extra virtio-consoles -> hvc2 / hvc3 in the guest). Created when
+    // the user selects the tab; finished in cleanup().
+    private val _extraSessions: Array<TerminalSession?> = arrayOfNulls(2)
 
     override val terminalSession: TerminalSession? get() = _terminalSession
+
+    override val terminalChannelCount: Int = 3
     override val bootStage: StateFlow<String> = _bootStage.asStateFlow()
 
     override val backendId: String = "qemu"
@@ -84,6 +90,15 @@ class QemuEngine @Inject constructor(
     val serialSockPath: String get() = "${context.filesDir.absolutePath}/serial.sock"
     val terminalSockPath: String get() = "${context.filesDir.absolutePath}/terminal.sock"
     val ctrlSockPath: String get() = "${context.filesDir.absolutePath}/ctrl.sock"
+    // Extra virtio-console terminal channels (hvc2, hvc3) for in-app multi-tab.
+    // Gettys are wired up in the rootfs via serial-getty@hvc2 / @hvc3.
+    val term1SockPath: String get() = "${context.filesDir.absolutePath}/term1.sock"
+    val term2SockPath: String get() = "${context.filesDir.absolutePath}/term2.sock"
+    // GPS NMEA channel: Android Location → hvc4 in the guest, where gpsd
+    // reads it as a serial GPS source. Only exposed when gpsBridgeEnabled.
+    override val gpsSockPath: String get() = "${context.filesDir.absolutePath}/gps.sock"
+    // Host bridge channel — guest-to-Android RPC (notify, port-forward, etc.)
+    // served by podroid-hostd in the guest.
     val hostSockPath: String get() = "${context.filesDir.absolutePath}/host.sock"
 
     /**
@@ -239,6 +254,36 @@ class QemuEngine @Inject constructor(
         return sess
     }
 
+    override fun createTerminalSession(index: Int, client: TerminalSessionClient): TerminalSession {
+        if (index == 0) return createTerminalSession(client)
+        require(index in 1..2) { "QemuEngine has no terminal at index $index" }
+        val slot = index - 1
+        _extraSessions[slot]?.let { return it }
+
+        val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
+        if (!bridgeExe.exists()) {
+            throw IllegalStateException("podroid-bridge not found at ${bridgeExe.absolutePath}")
+        }
+        // Tab → guest tty: index 1 -> term1.sock / hvc2, index 2 -> term2.sock / hvc3.
+        // The 3rd bridge arg names the tty so RESIZE writes on the shared
+        // ctrl.sock carry "RESIZE hvcN rows cols" — podroid-resize stty's the
+        // right tty instead of always clobbering hvc0.
+        val termSock = if (index == 1) term1SockPath else term2SockPath
+        val ttyName  = if (index == 1) "hvc2"        else "hvc3"
+        val sess = TerminalSession(
+            bridgeExe.absolutePath,
+            context.filesDir.absolutePath,
+            arrayOf(bridgeExe.absolutePath, termSock, ctrlSockPath, ttyName),
+            null,
+            2000,
+            client,
+        )
+        sess.updateSize(80, 24, 0, 0)
+        _extraSessions[slot] = sess
+        Log.d(TAG, "Bridge spawned for tab $index ($ttyName / $termSock)")
+        return sess
+    }
+
     override suspend fun start(portForwards: List<PortForwardRule>, config: VmConfig) {
         // Atomically check the re-entrancy guard AND claim Starting before any
         // I/O, so two concurrent ACTION_STARTs can't both pass the guard and
@@ -279,6 +324,9 @@ class QemuEngine @Inject constructor(
         File(serialSockPath).delete()
         File(terminalSockPath).delete()
         File(ctrlSockPath).delete()
+        File(term1SockPath).delete()
+        File(term2SockPath).delete()
+        File(gpsSockPath).delete()
         File(qmpSocketPath).delete()
         File(hostSockPath).delete()
 
@@ -471,12 +519,19 @@ class QemuEngine @Inject constructor(
         process = null
         _terminalSession?.finishIfRunning()
         _terminalSession = null
+        for (i in _extraSessions.indices) {
+            _extraSessions[i]?.finishIfRunning()
+            _extraSessions[i] = null
+        }
         sessionClientDelegate = null
         _consoleText.value = ""
         _runningSinceMs = null
         File(serialSockPath).delete()
         File(terminalSockPath).delete()
         File(ctrlSockPath).delete()
+        File(term1SockPath).delete()
+        File(term2SockPath).delete()
+        File(gpsSockPath).delete()
         _bootStage.value = ""
     }
 
@@ -589,13 +644,25 @@ class QemuEngine @Inject constructor(
         args += "-serial"; args += "unix:$serialSockPath,server,nowait"
 
         // ── virtio-console bus ────────────────────────────────────────────────
-        // hvc0 = primary terminal (getty runs here; bridge connects to terminal.sock)
-        // hvc1 = control channel (init daemon reads RESIZE messages from ctrl.sock)
+        // hvc0 = primary terminal (getty; bridge connects to terminal.sock)
+        // hvc1 = control channel (init daemon reads RESIZE from ctrl.sock)
+        // hvc2 = secondary terminal (getty; app tab 2 connects to term1.sock)
+        // hvc3 = tertiary terminal  (getty; app tab 3 connects to term2.sock)
         args += "-device";  args += "virtio-serial-pci"
         args += "-chardev"; args += "socket,id=term0,path=$terminalSockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=term0,name=org.podroid.term"
         args += "-chardev"; args += "socket,id=ctrl0,path=$ctrlSockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=ctrl0,name=org.podroid.ctrl"
+        args += "-chardev"; args += "socket,id=term1,path=$term1SockPath,server=on,wait=off"
+        args += "-device";  args += "virtconsole,chardev=term1,name=org.podroid.term1"
+        args += "-chardev"; args += "socket,id=term2,path=$term2SockPath,server=on,wait=off"
+        args += "-device";  args += "virtconsole,chardev=term2,name=org.podroid.term2"
+        // GPS NMEA stream from Android Location → hvc4. Only attached when the
+        // feature is enabled; gpsd inside the VM is wired to /dev/hvc4.
+        if (config.gpsBridgeEnabled) {
+            args += "-chardev"; args += "socket,id=gps0,path=$gpsSockPath,server=on,wait=off"
+            args += "-device";  args += "virtconsole,chardev=gps0,name=org.podroid.gps"
+        }
 
         // hvc2 = host bridge (guest podroid-hostd <-> Android host.sock)
         args += "-chardev"; args += "socket,id=host0,path=$hostSockPath,server=on,wait=off"

@@ -38,6 +38,20 @@ android {
     }
 
     signingConfigs {
+        // Stable debug signing key (committed in app/podroid-debug.jks).
+        // Without this, AGP regenerates ~/.android/debug.keystore on every
+        // fresh build host (CI runners, container restarts, fresh
+        // checkouts) — each build then carries a different signature, so
+        // Android refuses to install the new APK over the old one and the
+        // user has to uninstall first. Repo-committed debug keys are the
+        // standard fix and are safe to ship: they're for development side-
+        // loads only, never for distribution.
+        getByName("debug") {
+            storeFile     = file("podroid-debug.jks")
+            storePassword = "podroid"
+            keyAlias      = "podroid-debug"
+            keyPassword   = "podroid"
+        }
         create("release") {
             val storePath = (project.findProperty("PODROID_RELEASE_STORE_FILE") as? String)
             if (storePath != null && file(storePath).exists()) {

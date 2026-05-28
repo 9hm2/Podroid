@@ -52,6 +52,12 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <!--
+        GPS bridge — feeds Android Location fixes as NMEA into the VM (gpsd on
+        /dev/hvc4). Runtime permission; the bridge logs and skips if not granted.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!--
         Android Virtualization Framework (AVF / pKVM) opt-in. Both permissions
         are signature|*|development and can be granted to a side-loaded APK via
         `adb shell pm grant com.excp.podroid <name>` on pKVM-capable devices

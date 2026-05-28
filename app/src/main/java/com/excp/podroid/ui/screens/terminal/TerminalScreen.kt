@@ -42,11 +42,14 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.border
@@ -63,6 +66,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect as ComposeLaunchedEffect
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -78,6 +82,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.abs
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -125,6 +131,7 @@ fun TerminalScreen(
 ) {
     val context = LocalContext.current
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
+    var showCommands by remember { mutableStateOf(false) }
     val fontSize by viewModel.terminalFontSize.collectAsStateWithLifecycle()
     val showQuickSettings by viewModel.showQuickSettings.collectAsStateWithLifecycle()
     val showExtraKeys by viewModel.showExtraKeysFlow.collectAsStateWithLifecycle()
@@ -159,6 +166,10 @@ fun TerminalScreen(
 
     val colorTheme by viewModel.terminalColorTheme.collectAsStateWithLifecycle()
     val terminalFont by viewModel.terminalFont.collectAsStateWithLifecycle()
+
+    if (showCommands) {
+        CustomCommandsSheet(viewModel = viewModel, onDismiss = { showCommands = false })
+    }
 
     if (showQuickSettings) {
         // Pass the screen's viewModel explicitly so QuickSettingsDialog uses
@@ -202,6 +213,10 @@ fun TerminalScreen(
                 }
             },
             actions = {
+                IconButton(onClick = { showCommands = true }) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Custom commands")
+                }
+                Spacer(Modifier.width(PodroidTokens.Spacing.XS))
                 IconButton(onClick = onNavigateToX11) {
                     Icon(Icons.Default.DesktopWindows, contentDescription = "X11 screen")
                 }
@@ -270,16 +285,72 @@ fun TerminalScreen(
             }
 
             is VmState.Running -> {
+                // Tab strip for backends that expose >1 virtio-console terminal
+                // channel (QEMU's hvc0/hvc2/hvc3). Reading viewModel.currentTab
+                // here also tracks it for the AndroidView update lambda below,
+                // which swaps the TerminalView's session on tab change.
+                if (viewModel.terminalChannelCount > 1) {
+                    TabRow(selectedTabIndex = viewModel.currentTab) {
+                        repeat(viewModel.terminalChannelCount) { i ->
+                            Tab(
+                                selected = viewModel.currentTab == i,
+                                onClick = { viewModel.selectTab(i) },
+                                text = { Text("Term ${i + 1}") },
+                            )
+                        }
+                    }
+                }
+                // Swipe to switch tabs — directional-lock pointerInput so the
+                // embedded TerminalView's native vertical scroll isn't starved.
+                // We observe motion without consuming anything until the
+                // gesture has clearly committed horizontally (|dx| past slop
+                // AND |dx| > 2·|dy|). If vertical wins first we bail out
+                // entirely, leaving the rest of the gesture for TerminalView.
+                // Previously a plain Modifier.draggable(Horizontal) installed
+                // its own slop watcher on the same Box; that competition broke
+                // upward/downward terminal scrolling.
+                val swipeThresholdPx = with(LocalDensity.current) { 80.dp.toPx() }
+                val gestureSlopPx    = with(LocalDensity.current) { 16.dp.toPx() }
+                val swipeMod = if (viewModel.terminalChannelCount > 1) {
+                    Modifier.pointerInput(viewModel.terminalChannelCount) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var dx = 0f
+                            var dy = 0f
+                            var locked = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                // Multi-touch (pinch-zoom etc.) — let the
+                                // child handle it.
+                                if (event.changes.size > 1) return@awaitEachGesture
+                                val change = event.changes.first()
+                                val d = change.positionChange()
+                                dx += d.x
+                                dy += d.y
+                                if (!locked) {
+                                    if (abs(dy) > gestureSlopPx && abs(dy) >= abs(dx)) {
+                                        return@awaitEachGesture
+                                    }
+                                    if (abs(dx) > gestureSlopPx && abs(dx) > abs(dy) * 2) {
+                                        locked = true
+                                    }
+                                }
+                                if (locked) change.consume()
+                                if (!change.pressed) break
+                            }
+                            if (locked) {
+                                if (dx >  swipeThresholdPx) viewModel.selectTab(viewModel.currentTab - 1)
+                                else if (dx < -swipeThresholdPx) viewModel.selectTab(viewModel.currentTab + 1)
+                            }
+                        }
+                    }
+                } else Modifier
                 // Hoisted into its own composable so toggling chrome state in the
                 // parent (showQuickSettings, showExtraKeys, hapticsEnabled, modifier
-                // keys, etc.) doesn't invalidate the AndroidView slot. TerminalSurface
-                // takes only the ViewModel (stable @HiltViewModel) so Compose's
-                // restart-scope skipping kicks in: chrome toggles → parent recomposes,
-                // surface skips. The terminal pixels never re-route through Compose
-                // unless something the surface actually reads has changed.
+                // keys, etc.) doesn't invalidate the AndroidView slot.
                 TerminalSurface(
                     viewModel = viewModel,
-                    modifier = Modifier.weight(1f).fillMaxSize(),
+                    modifier = Modifier.weight(1f).fillMaxSize().then(swipeMod),
                 )
             }
         }
@@ -460,9 +531,22 @@ private fun TerminalSurface(
             }
         }
 
+        // Multi-tab: when the user switches tabs the ViewModel's currentTab
+        // mutableStateOf flips; reading it here tracks the State so the
+        // AndroidView's update lambda runs and re-attaches the active session.
+        // The DisposableEffect above already handles the first-time bind.
+        val activeTab = viewModel.currentTab
         AndroidView(
             factory = { view },
-            update = { },
+            update = { v ->
+                val sess = viewModel.currentSession ?: return@AndroidView
+                if (v.mTermSession !== sess) {
+                    v.mTermSession = sess
+                    v.mEmulator = sess.emulator
+                    v.onScreenUpdated()
+                    v.post { v.updateSize(); v.onScreenUpdated() }
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         )
     }

@@ -1,13 +1,15 @@
 name: Build app
 
-# Manually-triggered build of the full Podroid app. The custom kernel,
-# initramfs, Alpine rootfs and QEMU are cross-compiled via Docker, then the
-# APK is assembled and uploaded as a downloadable artifact. Optionally
-# publishes a GitHub Release with the APK attached.
+# Manually-triggered build of the full Podroid app. Cross-compiles the kernel,
+# Kali rootfs and QEMU in parallel jobs, then assembles the APK in a final
+# job that downloads each artifact.
 #
-# NOTE: workflow_dispatch only shows the "Run workflow" button when this file
-# exists on the repository's default branch (main). Add it there to use it;
-# the `branch` input still lets you build any other branch's code.
+# Wall-clock budget on ubuntu-latest:
+#   - kernel+initramfs : ~15 min  (Docker layer-cached)
+#   - rootfs (Kali)    : ~5 min   (debootstrap cached)
+#   - qemu             : ~25 min  first run, ~3 min cached
+#   - apk              : ~5 min
+# Parallel = ~25 min wall-clock first run, ~10 min cached.
 
 on:
   workflow_dispatch:
@@ -15,7 +17,7 @@ on:
       branch:
         description: Branch to build
         type: string
-        default: claude/create-dev-branch-yHxYg
+        default: kali-nethunter
       build_type:
         description: APK build type
         type: choice
@@ -31,56 +33,132 @@ on:
 permissions:
   contents: write
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-    steps:
-      - name: Checkout ${{ inputs.branch }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.branch }}
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
-      - name: Free disk space
-        run: |
+jobs:
+  # ── Independent native-binary builds (parallel) ───────────────────────────
+
+  initramfs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.branch }}" }
+      - run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           docker system prune -af || true
-          df -h /
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up QEMU (arm64 emulation for the Docker builds)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Optional: authenticates Docker Hub pulls to dodge anonymous rate limits.
-      # Skipped automatically when the DOCKERHUB_* secrets are not set.
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_USERNAME != ''
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Build kernel + initramfs
         run: ./build-all.sh initramfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-initramfs
+          path: |
+            app/src/main/assets/vmlinuz-virt
+            app/src/main/assets/initrd.img
+          if-no-files-found: error
 
-      - name: Build Alpine rootfs
+  rootfs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.branch }}" }
+      - run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build Kali rootfs
         run: ./build-all.sh rootfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-rootfs
+          path: app/src/main/assets/alpine-rootfs.squashfs
+          if-no-files-found: error
 
-      - name: Build QEMU
+  qemu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.branch }}" }
+      - run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build QEMU + bridge + launcher
         run: ./build-all.sh qemu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jnilibs-qemu
+          path: |
+            app/src/main/jniLibs/arm64-v8a/libqemu-system-aarch64.so
+            app/src/main/jniLibs/arm64-v8a/libslirp.so
+            app/src/main/jniLibs/arm64-v8a/libpodroid-bridge.so
+            app/src/main/jniLibs/arm64-v8a/libpodroid-launcher.so
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-qemu
+          path: app/src/main/assets/qemu/
+          if-no-files-found: error
+
+  # ── Final APK assembly job ────────────────────────────────────────────────
+
+  apk:
+    needs: [initramfs, rootfs, qemu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.branch }}" }
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+
+      - uses: android-actions/setup-android@v3
+
+      # Download every artifact produced by the parallel builders into the
+      # tree positions Gradle expects.
+      - name: Download kernel + initramfs assets
+        uses: actions/download-artifact@v4
+        with:
+          name: assets-initramfs
+          path: app/src/main/assets
+      - name: Download Kali rootfs asset
+        uses: actions/download-artifact@v4
+        with:
+          name: assets-rootfs
+          path: app/src/main/assets
+      - name: Download QEMU jniLibs
+        uses: actions/download-artifact@v4
+        with:
+          name: jnilibs-qemu
+          path: app/src/main/jniLibs/arm64-v8a
+      - name: Download QEMU assets (BIOS, keymaps)
+        uses: actions/download-artifact@v4
+        with:
+          name: assets-qemu
+          path: app/src/main/assets/qemu
 
       - name: Decode release keystore
         if: inputs.build_type == 'release'
@@ -100,8 +178,7 @@ jobs:
             ./gradlew --no-daemon assembleDebug
           fi
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: podroid-${{ inputs.build_type }}-apk
           path: app/build/outputs/apk/**/*.apk

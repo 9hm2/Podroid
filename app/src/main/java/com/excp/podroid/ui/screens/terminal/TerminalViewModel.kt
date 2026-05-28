@@ -64,6 +64,7 @@ class TerminalViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val engine: VmEngine,
     private val settingsRepository: SettingsRepository,
+    private val customCommandsRepository: com.excp.podroid.data.repository.CustomCommandsRepository,
 ) : ViewModel() {
 
     val vmState: StateFlow<VmState> = engine.state
@@ -466,6 +467,34 @@ class TerminalViewModel @Inject constructor(
     var session: TerminalSession? = null
         private set
 
+    // ── Multi-tab terminal ────────────────────────────────────────────────
+    // QemuEngine exposes 3 virtio-console channels (hvc0/hvc2/hvc3); other
+    // backends advertise 1. Each tab gets its own TerminalSession via the
+    // engine's indexed factory; the engine caches the sessions so reselecting
+    // a tab returns the same bridge subprocess.
+    val terminalChannelCount: Int = engine.terminalChannelCount
+
+    var currentTab: Int by mutableStateOf(0)
+        private set
+
+    /** Active session for the currently-selected tab, or null if creation
+     *  failed (e.g. AVF backend asked for a tab > 0). */
+    val currentSession: TerminalSession?
+        get() = if (currentTab == 0) {
+            session
+        } else {
+            runCatching { engine.createTerminalSession(currentTab, sessionClient) }
+                .onFailure { e -> Log.w(TAG, "createTerminalSession($currentTab) failed: ${e.message}") }
+                .getOrNull()
+        }
+
+    fun selectTab(index: Int) {
+        if (index !in 0 until terminalChannelCount) return
+        currentTab = index
+        // Trigger lazy bridge spawn for non-primary tabs by touching the getter.
+        currentSession
+    }
+
     var extraCtrl by mutableStateOf(false)
         private set
     var extraAlt by mutableStateOf(false)
@@ -654,6 +683,7 @@ class TerminalViewModel @Inject constructor(
     fun resetOnRestart() {
         attached = false
         session = null
+        currentTab = 0
     }
 
     /**
@@ -732,15 +762,19 @@ class TerminalViewModel @Inject constructor(
             "CTRL" -> { extraCtrl = !extraCtrl; return }
             "ALT"  -> { extraAlt = !extraAlt; return }
         }
+        // Route through currentSession (not the cached tab-0 `session` field)
+        // so multi-tab extra-key presses land in whichever tab is on screen.
+        val target = currentSession ?: return
+        val emu = target.emulator
         val bytes = when (key) {
             "ESC"  -> byteArrayOf(27)
             "TAB"  -> byteArrayOf(9)
-            "UP"   -> if (isDecsetSet(session?.emulator, 1)) "\u001bOA".toByteArray() else "\u001b[A".toByteArray()
-            "DOWN" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOB".toByteArray() else "\u001b[B".toByteArray()
-            "LEFT" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOD".toByteArray() else "\u001b[D".toByteArray()
-            "RIGHT"-> if (isDecsetSet(session?.emulator, 1)) "\u001bOC".toByteArray() else "\u001b[C".toByteArray()
-            "HOME" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOH".toByteArray() else "\u001b[H".toByteArray()
-            "END"  -> if (isDecsetSet(session?.emulator, 1)) "\u001bOF".toByteArray() else "\u001b[F".toByteArray()
+            "UP"   -> if (isDecsetSet(emu, 1)) "\u001bOA".toByteArray() else "\u001b[A".toByteArray()
+            "DOWN" -> if (isDecsetSet(emu, 1)) "\u001bOB".toByteArray() else "\u001b[B".toByteArray()
+            "LEFT" -> if (isDecsetSet(emu, 1)) "\u001bOD".toByteArray() else "\u001b[D".toByteArray()
+            "RIGHT"-> if (isDecsetSet(emu, 1)) "\u001bOC".toByteArray() else "\u001b[C".toByteArray()
+            "HOME" -> if (isDecsetSet(emu, 1)) "\u001bOH".toByteArray() else "\u001b[H".toByteArray()
+            "END"  -> if (isDecsetSet(emu, 1)) "\u001bOF".toByteArray() else "\u001b[F".toByteArray()
             "PGUP" -> "\u001b[5~".toByteArray()
             "PGDN" -> "\u001b[6~".toByteArray()
             "F1"   -> "\u001bOP".toByteArray()
@@ -760,7 +794,7 @@ class TerminalViewModel @Inject constructor(
             "/"    -> "/".toByteArray()
             else   -> return
         }
-        session?.write(bytes, 0, bytes.size)
+        target.write(bytes, 0, bytes.size)
         extraCtrl = false
         extraAlt = false
     }
@@ -773,6 +807,56 @@ class TerminalViewModel @Inject constructor(
             engine.sessionClientDelegate = null
         }
         attached = false
+    }
+
+    // ── Custom Commands ──────────────────────────────────────────────────────
+    // User-defined one-tap commands (the NetHunter analog). The sheet UI reads
+    // [customCommands]; [runCommand] writes the command to the active tab's
+    // session (or hops to the next tab first when openNewTab is set).
+    // runCommand is a no-op when the VM is not Running — the sheet additionally
+    // gates the Run buttons on vmState so the failure mode is visible.
+    val customCommands: StateFlow<List<com.excp.podroid.data.repository.CustomCommand>> =
+        customCommandsRepository.commands
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun addCustomCommand(name: String, command: String, openNewTab: Boolean) {
+        if (name.isBlank() || command.isBlank()) return
+        viewModelScope.launch { customCommandsRepository.add(name.trim(), command.trim(), openNewTab) }
+    }
+
+    fun updateCustomCommand(cc: com.excp.podroid.data.repository.CustomCommand) {
+        if (cc.name.isBlank() || cc.command.isBlank()) return
+        viewModelScope.launch {
+            customCommandsRepository.update(cc.copy(name = cc.name.trim(), command = cc.command.trim()))
+        }
+    }
+
+    /** direction = -1 for up, +1 for down; no-op at the list edges. */
+    fun moveCustomCommand(id: String, direction: Int) {
+        viewModelScope.launch { customCommandsRepository.move(id, direction) }
+    }
+
+    fun removeCustomCommand(id: String) {
+        viewModelScope.launch { customCommandsRepository.remove(id) }
+    }
+
+    fun runCommand(cc: com.excp.podroid.data.repository.CustomCommand) {
+        if (engine.state.value !is VmState.Running) return
+        val targetTab =
+            if (cc.openNewTab && terminalChannelCount > 1)
+                (currentTab + 1) % terminalChannelCount
+            else currentTab
+        if (targetTab != currentTab) selectTab(targetTab)
+        viewModelScope.launch {
+            // Fresh tabs need a moment to spawn the bridge + reach the shell
+            // prompt; without the wait the command races getty / login and the
+            // first chars get eaten. With autologin the typical settle is
+            // ~200 ms; 400 ms is a safe headroom on slow boots.
+            if (targetTab != currentTab || cc.openNewTab) {
+                withContext(Dispatchers.Default) { kotlinx.coroutines.delay(400) }
+            }
+            runCatching { currentSession?.write(cc.command + "\n") }
+        }
     }
 
     companion object {

@@ -1,6 +1,11 @@
 package com.excp.podroid.ui.screens.settings
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -325,6 +330,73 @@ fun SettingsScreen(
                         onQemuReset = viewModel::resetQemuExtraArgs,
                         onKernelReset = viewModel::resetKernelExtraCmdline,
                         enabled = vmNotRunning,
+                    )
+
+                    PodroidSectionLabel("USB passthrough")
+                    val usbPassthrough by viewModel.usbPassthroughEnabled.collectAsStateWithLifecycle()
+                    PodroidListRow(
+                        label = "USB device passthrough",
+                        rightSlot = {
+                            PodroidSwitch(
+                                checked = usbPassthrough,
+                                onCheckedChange = { viewModel.setUsbPassthroughEnabled(it) },
+                                enabled = vmNotRunning,
+                            )
+                        },
+                    )
+                    Text(
+                        text = "Hot-plugs external USB devices into the running VM. Each device " +
+                            "asks for permission when attached. Adds a USB controller at boot — " +
+                            "restart the VM to apply. Requires a libusb-enabled QEMU build.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(
+                            start = PodroidTokens.Spacing.MD,
+                            end = PodroidTokens.Spacing.MD,
+                            bottom = PodroidTokens.Spacing.SM,
+                        ),
+                    )
+
+                    PodroidSectionLabel("GPS bridge")
+                    val gpsBridge by viewModel.gpsBridgeEnabled.collectAsStateWithLifecycle()
+                    // Launches the system Location permission dialog when the
+                    // user flips the toggle ON without the grant; only flips
+                    // the setting on if/when the user grants it.
+                    val gpsPermLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.RequestPermission()
+                    ) { granted -> if (granted) viewModel.setGpsBridgeEnabled(true) }
+                    PodroidListRow(
+                        label = "Stream Android Location into the VM",
+                        rightSlot = {
+                            PodroidSwitch(
+                                checked = gpsBridge,
+                                onCheckedChange = { wantOn ->
+                                    if (!wantOn) {
+                                        viewModel.setGpsBridgeEnabled(false)
+                                    } else {
+                                        val granted = ContextCompat.checkSelfPermission(
+                                            ctx, Manifest.permission.ACCESS_FINE_LOCATION,
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                        if (granted) viewModel.setGpsBridgeEnabled(true)
+                                        else gpsPermLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                                    }
+                                },
+                                enabled = vmNotRunning,
+                            )
+                        },
+                    )
+                    Text(
+                        text = "Pipes Android GPS as NMEA into /dev/hvc4 in the VM; gpsd serves it " +
+                            "on TCP 2947 to kismet / wifite / gpsmon. Requires the system Location " +
+                            "permission (grant in app info). Adds a virtio-console at boot — " +
+                            "restart the VM to apply. QEMU backend only.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(
+                            start = PodroidTokens.Spacing.MD,
+                            end = PodroidTokens.Spacing.MD,
+                            bottom = PodroidTokens.Spacing.SM,
+                        ),
                     )
                 }
 

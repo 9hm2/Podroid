@@ -186,6 +186,13 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setUsbPassthroughEnabled(value) }
     }
 
+    val gpsBridgeEnabled: StateFlow<Boolean> = settingsRepository.gpsBridgeEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    fun setGpsBridgeEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setGpsBridgeEnabled(value) }
+    }
+
     suspend fun setLanguage(value: String) {
         Log.d(TAG, "setLanguage: $value")
         languageManager.setLanguage(value)

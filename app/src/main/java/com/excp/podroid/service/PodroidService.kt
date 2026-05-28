@@ -33,6 +33,7 @@ import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.VmConfig
 import com.excp.podroid.engine.VmEngine
 import com.excp.podroid.engine.VmState
+import com.excp.podroid.engine.gps.GpsBridgeManager
 import com.excp.podroid.engine.usb.UsbPassthroughManager
 import com.excp.podroid.util.NetworkUtils
 import com.excp.podroid.x11.X11Constants
@@ -48,6 +49,7 @@ class PodroidService : Service() {
     @Inject lateinit var portForwardRepository: PortForwardRepository
     @Inject lateinit var settingsRepository: SettingsRepository
     @Inject lateinit var usbPassthroughManager: UsbPassthroughManager
+    @Inject lateinit var gpsBridgeManager: GpsBridgeManager
     @Inject lateinit var notificationPoster: com.excp.podroid.engine.hostbridge.AndroidNotificationPoster
     private var hostRequestServer: com.excp.podroid.engine.hostbridge.HostRequestServer? = null
 
@@ -134,6 +136,7 @@ class PodroidService : Service() {
         notificationJob?.cancel()
         hostRequestServer?.stop()
         usbPassthroughManager.stop()
+        gpsBridgeManager.stop()
         releaseWakeLock()
         serviceScope.cancel()
     }
@@ -266,6 +269,19 @@ class PodroidService : Service() {
         }
     }
 
+    /** Arms the GPS NMEA bridge while the VM is Running; mirrors the
+     *  USB-passthrough observer. */
+    private suspend fun observeStateForGps() {
+        engine.state.collect { state ->
+            when (state) {
+                is VmState.Running -> gpsBridgeManager.start()
+                is VmState.Stopped, is VmState.Idle, is VmState.Error ->
+                    gpsBridgeManager.stop()
+                else -> {}
+            }
+        }
+    }
+
     private fun ensureHostBridge(): com.excp.podroid.engine.hostbridge.HostRequestServer {
         hostRequestServer?.let { return it }
         val dispatcher = com.excp.podroid.engine.hostbridge.HostRequestDispatcher(
@@ -333,10 +349,14 @@ class PodroidService : Service() {
                         verboseLogging = settingsRepository.getAvfVerboseLoggingSnapshot(),
                         x11Dpi = settingsRepository.getX11DpiSnapshot(),
                         usbPassthroughEnabled = settingsRepository.getUsbPassthroughEnabledSnapshot(),
+                        gpsBridgeEnabled      = settingsRepository.getGpsBridgeEnabledSnapshot(),
                     )
                     serviceScope.launch { observeStateForHostBridge() }
                     if (config.usbPassthroughEnabled) {
                         serviceScope.launch { observeStateForUsb() }
+                    }
+                    if (config.gpsBridgeEnabled) {
+                        serviceScope.launch { observeStateForGps() }
                     }
                     engine.start(rules, config)
                 } catch (e: Exception) {
